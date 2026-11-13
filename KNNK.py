@@ -1,8 +1,7 @@
 # ============================================================
 # FINAL PERFORMANCE REPORT + CREATIVE LEVEL BREAKDOWN
-# Streamlit version (converted from the Google Colab script)
-#
-# Run locally :  streamlit run app.py
+# Streamlit version
+# Run: streamlit run app.py
 # ============================================================
 
 import io
@@ -23,11 +22,6 @@ from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XLImage
 
 warnings.filterwarnings("ignore", category=FutureWarning)
-
-
-# ============================================================
-# 0. CURRENCY OPTIONS (used by the sidebar selector)
-# ============================================================
 
 CURRENCY_FORMATS = {
     "1": '"$"#,##0.00',
@@ -51,11 +45,6 @@ CURRENCY_NAMES = {
     "8": "None (plain)",
 }
 
-
-# ============================================================
-# 1. STYLE OBJECTS (module level so helpers can use them)
-# ============================================================
-
 header_fill = PatternFill(fill_type="solid", fgColor="D9D9D9")
 total_fill = PatternFill(fill_type="solid", fgColor="D9D9D9")
 white_fill = PatternFill(fill_type="solid", fgColor="FFFFFF")
@@ -65,10 +54,6 @@ total_font = Font(name="Calibri", bold=True, color="000000")
 thin_side = Side(style="thin", color="000000")
 table_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
-
-# ============================================================
-# 2. HELPER FUNCTIONS (unchanged from the Colab script)
-# ============================================================
 
 def clean_column_names(df):
     df = df.copy()
@@ -157,7 +142,6 @@ def clean_percentage_series(series):
          .str.replace(r"^\((.*)\)$", r"-\1", regex=True)
     )
     numeric = pd.to_numeric(s, errors="coerce")
-    # 1.13 is already 113%. Only whole-number percents such as 85 or 113.2 are divided.
     mask_large = numeric > 2
     numeric = numeric.where(~mask_large, numeric / 100)
     return numeric
@@ -328,7 +312,6 @@ def apply_excel_totals(ws, header_row, data_start, data_end, sum_columns,
 
 
 def apply_delivery_formulas(ws, header_row, data_start, data_end):
-    """Delivery % = Delivery Impressions / Contracted Impressions, including the total row."""
     header_map = {cell.value: cell.column for cell in ws[header_row] if cell.value is not None}
     needed = ("Delivery", "Delivery Impressions", "Contracted Impressions")
     if any(name not in header_map for name in needed):
@@ -341,7 +324,6 @@ def apply_delivery_formulas(ws, header_row, data_start, data_end):
 
 
 def paint_black_columns(ws, header_row, data_start, data_end, column_names):
-    """Black border on every cell in these columns, including blanks. No black fill."""
     header_map = {cell.value: cell.column for cell in ws[header_row] if cell.value is not None}
     for col_name in column_names:
         if col_name not in header_map:
@@ -361,28 +343,13 @@ def paint_black_columns(ws, header_row, data_start, data_end, column_names):
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
 
-# ============================================================
-# 3. MAIN PIPELINE  (sections 3-18 of the Colab script)
-#    Same logic - wrapped in one function so Streamlit can call it.
-# ============================================================
-
 def build_report(file_bytes, currency_choice="1", log=print):
-    """
-    file_bytes      : raw bytes of the uploaded .xlsx / .xlsm
-    currency_choice : "1".."8" (see CURRENCY_FORMATS)
-    log             : callable used instead of print()
-    Returns (output_xlsx_bytes, download_name, df_creative_final)
-    """
-
     def src():
         return io.BytesIO(file_bytes)
 
     currency_format = CURRENCY_FORMATS.get(currency_choice, CURRENCY_FORMATS["1"])
     log(f"Selected currency: {CURRENCY_NAMES.get(currency_choice, 'USD ($)')}")
 
-    # --------------------------------------------------------
-    # Validate workbook
-    # --------------------------------------------------------
     try:
         workbook_source = pd.ExcelFile(src())
     except Exception as exc:
@@ -393,12 +360,8 @@ def build_report(file_bytes, currency_choice="1", log=print):
     if "Creative Level" not in workbook_source.sheet_names:
         raise ValueError("The uploaded workbook must contain a sheet named 'Creative Level'.")
 
-    # --------------------------------------------------------
-    # 3. READ PERFORMANCE REPORT FROM ROW 9
-    # --------------------------------------------------------
     log("Reading Performance Report data starting from row 9 ...")
     df_raw = pd.read_excel(src(), sheet_name="Performance Report", header=8)
-
     df_raw = df_raw.dropna(axis=1, how="all")
     df_raw = clean_column_names(df_raw)
 
@@ -408,18 +371,12 @@ def build_report(file_bytes, currency_choice="1", log=print):
             "Line Item Name", "Proposal ID", "Proposal Name", "Campaign Start",
             "Campaign End", "Line Item ID", "Contracted Impressions", "Billable Impressions",
         ],
-        "Performance Report"
+        "Performance Report",
     )
 
     df_raw = df_raw[df_raw["Line Item Name"].notna()].copy()
-    df_raw = df_raw[
-        ~df_raw["Line Item Name"].astype(str).str.strip().str.lower().eq("total")
-    ].copy()
-
-    df_raw = df_raw.rename(columns={
-        "Local Impressions": "Delivery Impressions",
-        "Local Clicks": "Clicks",
-    })
+    df_raw = df_raw[~df_raw["Line Item Name"].astype(str).str.strip().str.lower().eq("total")].copy()
+    df_raw = df_raw.rename(columns={"Local Impressions": "Delivery Impressions", "Local Clicks": "Clicks"})
     df_raw = clean_column_names(df_raw)
 
     delivery_pct_candidates = [
@@ -428,7 +385,6 @@ def build_report(file_bytes, currency_choice="1", log=print):
         "Delivery", "Delivered",
     ]
     source_delivery_col = first_existing_column(df_raw, delivery_pct_candidates)
-
     if source_delivery_col:
         log(f"Found user Delivery column: '{source_delivery_col}'")
         df_raw["_User_Delivery_Pct"] = clean_percentage_series(df_raw[source_delivery_col])
@@ -453,31 +409,20 @@ def build_report(file_bytes, currency_choice="1", log=print):
         if values.eq(0).all():
             df_raw.drop(columns=col, inplace=True)
 
-    # --------------------------------------------------------
-    # 4. VCPM DETECTION
-    # --------------------------------------------------------
     line_item_lower = df_raw["Line Item Name"].fillna("").astype(str).str.strip().str.lower()
-    vcpm_mask = line_item_lower.str.contains("vcpm", regex=False, na=False)
-    has_vcpm = bool(vcpm_mask.any())
+    has_vcpm = bool(line_item_lower.str.contains("vcpm", regex=False, na=False).any())
     log(f"VCPM detected: {'YES' if has_vcpm else 'NO'}")
 
-    # --------------------------------------------------------
-    # 5. SPLIT MAIN / SPECIAL
-    # --------------------------------------------------------
     special_mask = line_item_lower.str.match(r"^\(\d+\)", na=False)
     df_main_raw = df_raw[~special_mask].copy()
     df_special_raw = df_raw[special_mask].copy()
 
-    # --------------------------------------------------------
-    # 6. COLUMN DEFINITIONS
-    # --------------------------------------------------------
     main_columns = [
         "Proposal ID", "Proposal Name", "Campaign Start", "Campaign End",
         "Line Item ID", "Line Item Name", "Contracted Impressions",
         "Delivery Impressions", "Billable Impressions", "Clicks", "CTR",
         "CTR Benchmark", "Delivery", "Video Starts", "Video Start Rate",
-        "Video 25", "Video 50", "Video 75", "Video Completions",
-        "Video Completion Rate",
+        "Video 25", "Video 50", "Video 75", "Video Completions", "Video Completion Rate",
     ]
     if has_vcpm:
         main_columns.extend([
@@ -497,16 +442,11 @@ def build_report(file_bytes, currency_choice="1", log=print):
         "Campaign Budget Delivered", "Campaign Budget Remaining", "Campaign Length",
     ]
 
-    # --------------------------------------------------------
-    # 7. PREPARE MAIN DATA
-    # --------------------------------------------------------
     def prepare_main(df):
         df = format_date_columns(df.copy())
-
         for col in ["Contracted Impressions", "Delivery Impressions", "Clicks"]:
             if col in df.columns:
                 df[col] = clean_and_convert_numeric(df[col])
-
         other_numeric = [
             "Billable Impressions", "CTR Benchmark", "Video Starts", "Video 25",
             "Video 50", "Video 75", "Video Completions", "Contracted Rate",
@@ -518,22 +458,18 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 "Total Active View % Viewable Impressions",
             ])
         df = convert_numeric_columns(df, other_numeric)
-
         df["CTR"] = safe_ratio(df["Clicks"], df["Delivery Impressions"])
         df["Delivery"] = df["_User_Delivery_Pct"] if "_User_Delivery_Pct" in df.columns else np.nan
         df["Video Start Rate"] = safe_ratio(df["Video Starts"], df["Delivery Impressions"])
         df["Video Completion Rate"] = safe_ratio(df["Video Completions"], df["Video Starts"])
-
         start = pd.to_datetime(df["Campaign Start"], errors="coerce")
         end = pd.to_datetime(df["Campaign End"], errors="coerce")
         df["Campaign Length"] = (end - start).dt.days + 1
-
         if has_vcpm:
             current_line_items = df["Line Item Name"].fillna("").astype(str).str.strip().str.lower()
             current_vcpm_mask = current_line_items.str.contains("vcpm", regex=False, na=False)
             df.loc[~current_vcpm_mask, "Total Active View Viewable Impressions"] = np.nan
             df.loc[~current_vcpm_mask, "Total Active View % Viewable Impressions"] = np.nan
-
         campaign_type_lower = df["Campaign Type"].fillna("").astype(str).str.strip().str.lower()
         cpd_mask = campaign_type_lower.eq("cpd")
         cpd_length = pd.to_numeric(df.loc[cpd_mask, "Campaign Length"], errors="coerce")
@@ -541,36 +477,26 @@ def build_report(file_bytes, currency_choice="1", log=print):
         df.loc[cpd_mask, "Contracted Rate"] = np.where(
             cpd_length.notna() & cpd_length.ne(0), cpd_cost / cpd_length, np.nan
         )
-
         for col in main_columns:
             if col not in df.columns:
                 df[col] = np.nan
         return df[main_columns].copy()
 
-    # --------------------------------------------------------
-    # 8. PREPARE SPECIAL DATA
-    # --------------------------------------------------------
     def prepare_special(df):
         if df.empty:
             return pd.DataFrame(columns=special_columns)
-
         df = format_date_columns(df.copy())
         for col in ["Contracted Impressions", "Delivery Impressions"]:
             if col in df.columns:
                 df[col] = clean_and_convert_numeric(df[col])
-
-        numeric_columns = [
+        df = convert_numeric_columns(df, [
             "Billable Impressions", "Contracted Rate", "Net Cost",
             "Campaign Budget Delivered", "Campaign Budget Remaining",
-        ]
-        df = convert_numeric_columns(df, numeric_columns)
-
+        ])
         df["Delivery"] = df["_User_Delivery_Pct"] if "_User_Delivery_Pct" in df.columns else np.nan
-
         start = pd.to_datetime(df["Campaign Start"], errors="coerce")
         end = pd.to_datetime(df["Campaign End"], errors="coerce")
         df["Campaign Length"] = (end - start).dt.days + 1
-
         campaign_type_lower = df["Campaign Type"].fillna("").astype(str).str.strip().str.lower()
         cpd_mask = campaign_type_lower.eq("cpd")
         cpd_length = pd.to_numeric(df.loc[cpd_mask, "Campaign Length"], errors="coerce")
@@ -578,7 +504,6 @@ def build_report(file_bytes, currency_choice="1", log=print):
         df.loc[cpd_mask, "Contracted Rate"] = np.where(
             cpd_length.notna() & cpd_length.ne(0), cpd_cost / cpd_length, np.nan
         )
-
         for col in special_columns:
             if col not in df.columns:
                 df[col] = np.nan
@@ -587,27 +512,19 @@ def build_report(file_bytes, currency_choice="1", log=print):
     df_main = prepare_main(df_main_raw)
     df_special = prepare_special(df_special_raw)
 
-    # --------------------------------------------------------
-    # 9. CREATE MAIN TOTAL ROW
-    # --------------------------------------------------------
     def create_main_total(df):
         total = {col: np.nan for col in main_columns}
         total["Line Item Name"] = "Total"
-
-        sum_columns = [
+        for col in [
             "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
             "Clicks", "Video Starts", "Video 25", "Video 50", "Video 75",
-            "Video Completions", "Net Cost", "Campaign Budget Delivered",
-            "Campaign Budget Remaining",
-        ]
-        for col in sum_columns:
+            "Video Completions", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
+        ]:
             total[col] = pd.to_numeric(df[col], errors="coerce").sum()
-
         total["CTR"] = safe_ratio(total["Clicks"], total["Delivery Impressions"])
         total["Delivery"] = np.nan
         total["Video Start Rate"] = safe_ratio(total["Video Starts"], total["Delivery Impressions"])
         total["Video Completion Rate"] = safe_ratio(total["Video Completions"], total["Video Starts"])
-
         if has_vcpm:
             line_items = df["Line Item Name"].fillna("").astype(str).str.strip().str.lower()
             vcpm_rows = df[line_items.str.contains("vcpm", regex=False, na=False)]
@@ -615,54 +532,39 @@ def build_report(file_bytes, currency_choice="1", log=print):
             vcpm_delivery = pd.to_numeric(vcpm_rows["Delivery Impressions"], errors="coerce").sum()
             total["Total Active View Viewable Impressions"] = vcpm_viewable
             total["Total Active View % Viewable Impressions"] = safe_ratio(vcpm_viewable, vcpm_delivery)
-
         total["Campaign Length"] = pd.to_numeric(df["Campaign Length"], errors="coerce").max()
         return pd.DataFrame([total], columns=main_columns)
 
-    # --------------------------------------------------------
-    # 10. CREATE SPECIAL TOTAL ROW
-    # --------------------------------------------------------
     def create_special_total(df):
         total = {col: np.nan for col in special_columns}
         total["Line Item Name"] = "Total"
-        sum_columns = [
+        for col in [
             "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
             "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
-        ]
-        for col in sum_columns:
+        ]:
             total[col] = pd.to_numeric(df[col], errors="coerce").sum()
         total["Delivery"] = np.nan
         total["Campaign Length"] = pd.to_numeric(df["Campaign Length"], errors="coerce").max()
         return pd.DataFrame([total], columns=special_columns)
 
     df_main_final = pd.concat([df_main, create_main_total(df_main)], ignore_index=True)
-
     if not df_special.empty:
         df_special_final = pd.concat([df_special, create_special_total(df_special)], ignore_index=True)
         has_special = True
     else:
         df_special_final = pd.DataFrame(columns=special_columns)
         has_special = False
-
     log(f"Special section included: {'YES' if has_special else 'NO'}")
 
-    # --------------------------------------------------------
-    # 11. READ CREATIVE LEVEL FROM ROW 9
-    # --------------------------------------------------------
     log("Reading Creative Level data starting from row 9 ...")
     df_creative_original = pd.read_excel(src(), sheet_name="Creative Level", header=8)
-
-    df_creative = df_creative_original.copy()
-    df_creative = df_creative.dropna(how="all").copy()
+    df_creative = df_creative_original.copy().dropna(how="all").copy()
     df_creative = clean_column_names(df_creative)
-
-    creative_rename_map = {
+    df_creative = df_creative.rename(columns={
         "Local Impressions": "Delivered Impressions",
         "Local Clicks": "Clicks",
         "Video Completion Rate": "Video Completions Rate",
-    }
-    df_creative = df_creative.rename(columns=creative_rename_map)
-
+    })
     creative_columns = [
         "Report Start", "Line Item Name", "Creative Name",
         "Delivered Impressions", "Third Party Impressions", "Clicks",
@@ -673,13 +575,11 @@ def build_report(file_bytes, currency_choice="1", log=print):
     for col in creative_columns:
         if col not in df_creative.columns:
             df_creative[col] = np.nan
-
     df_creative["Creative Name"] = (
         df_creative["Creative Name"].astype("string")
         .str.replace(r"\s*\(copy\)", "", case=False, regex=True)
         .str.strip()
     )
-
     report_start_lookup = df_raw[["Line Item Name", "Campaign Start"]].copy()
     report_start_lookup["Campaign Start"] = pd.to_datetime(report_start_lookup["Campaign Start"], errors="coerce")
     report_start_lookup = (
@@ -687,26 +587,17 @@ def build_report(file_bytes, currency_choice="1", log=print):
         .groupby("Line Item Name", as_index=False)["Campaign Start"].min()
         .rename(columns={"Campaign Start": "Report Start"})
     )
-    report_start_lookup["Report Start"] = pd.to_datetime(
-        report_start_lookup["Report Start"], errors="coerce"
-    ).dt.date
-
+    report_start_lookup["Report Start"] = pd.to_datetime(report_start_lookup["Report Start"], errors="coerce").dt.date
     df_creative = df_creative.drop(columns=["Report Start"], errors="ignore").merge(
         report_start_lookup, on="Line Item Name", how="left"
     )
-
     if "Campaign Budget Delivered" not in df_creative.columns:
         df_creative["Campaign Budget Delivered"] = np.nan
-    df_creative["Campaign Budget Delivered"] = pd.to_numeric(
-        df_creative["Campaign Budget Delivered"], errors="coerce"
-    )
-
-    creative_numeric_columns = [
-        "Delivered Impressions", "Third Party Impressions", "Clicks",
-        "Third Party Clicks", "Video Starts", "Video 25", "Video 50",
-        "Video 75", "Video Completions", "Campaign Budget Delivered",
-    ]
-    for col in creative_numeric_columns:
+    df_creative["Campaign Budget Delivered"] = pd.to_numeric(df_creative["Campaign Budget Delivered"], errors="coerce")
+    for col in [
+        "Delivered Impressions", "Third Party Impressions", "Clicks", "Third Party Clicks",
+        "Video Starts", "Video 25", "Video 50", "Video 75", "Video Completions", "Campaign Budget Delivered",
+    ]:
         if col in df_creative.columns:
             cleaned = (
                 df_creative[col].astype("string").str.strip()
@@ -716,36 +607,23 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 .str.replace(r"^\((.*)\)$", r"-\1", regex=True)
             )
             df_creative[col] = pd.to_numeric(cleaned, errors="coerce").fillna(0)
-
     df_creative["Line Item Name"] = df_creative["Line Item Name"].astype("string").str.strip()
     df_creative["Creative Name"] = df_creative["Creative Name"].astype("string").str.strip()
     df_creative["Report Start"] = pd.to_datetime(df_creative["Report Start"], errors="coerce").dt.date
-
     df_creative["CTR"] = safe_ratio_zero(df_creative["Clicks"], df_creative["Delivered Impressions"])
-    df_creative["Video Completions Rate"] = safe_ratio_zero(
-        df_creative["Video Completions"], df_creative["Video Starts"]
-    )
-
+    df_creative["Video Completions Rate"] = safe_ratio_zero(df_creative["Video Completions"], df_creative["Video Starts"])
     creative_name_text = df_creative["Creative Name"].astype("string").str.strip()
     invalid_creative_names = {"", "nan", "none", "null", "<na>", "na", "n/a"}
     valid_mask = creative_name_text.notna() & ~creative_name_text.str.lower().isin(invalid_creative_names)
     df_creative = df_creative.loc[valid_mask].copy()
-
     group_columns = ["Report Start", "Line Item Name", "Creative Name"]
     sum_metric_columns = [
-        "Delivered Impressions", "Third Party Impressions", "Clicks",
-        "Third Party Clicks", "Video Starts", "Video 25", "Video 50",
-        "Video 75", "Video Completions", "Campaign Budget Delivered",
+        "Delivered Impressions", "Third Party Impressions", "Clicks", "Third Party Clicks",
+        "Video Starts", "Video 25", "Video 50", "Video 75", "Video Completions", "Campaign Budget Delivered",
     ]
-
-    df_creative = (
-        df_creative.groupby(group_columns, as_index=False, dropna=False, sort=False)[sum_metric_columns]
-        .sum()
-    )
+    df_creative = df_creative.groupby(group_columns, as_index=False, dropna=False, sort=False)[sum_metric_columns].sum()
     df_creative["CTR"] = safe_ratio_zero(df_creative["Clicks"], df_creative["Delivered Impressions"])
-    df_creative["Video Completions Rate"] = safe_ratio_zero(
-        df_creative["Video Completions"], df_creative["Video Starts"]
-    )
+    df_creative["Video Completions Rate"] = safe_ratio_zero(df_creative["Video Completions"], df_creative["Video Starts"])
     df_creative = df_creative[creative_columns].copy()
 
     def create_creative_total(df):
@@ -761,78 +639,51 @@ def build_report(file_bytes, currency_choice="1", log=print):
 
     df_creative_final = pd.concat([df_creative, create_creative_total(df_creative)], ignore_index=True)
     df_creative_final = missing_values_to_zero(df_creative_final)
-
     total_row_mask = df_creative_final["Creative Name"].astype(str).str.strip().str.lower().eq("total")
     df_creative_final.loc[total_row_mask, ["Report Start", "Line Item Name"]] = ""
     df_creative_final.loc[total_row_mask, "CTR"] = safe_ratio_zero(
         df_creative_final.loc[total_row_mask, "Clicks"],
-        df_creative_final.loc[total_row_mask, "Delivered Impressions"]
+        df_creative_final.loc[total_row_mask, "Delivered Impressions"],
     )
     df_creative_final.loc[total_row_mask, "Video Completions Rate"] = safe_ratio_zero(
         df_creative_final.loc[total_row_mask, "Video Completions"],
-        df_creative_final.loc[total_row_mask, "Video Starts"]
+        df_creative_final.loc[total_row_mask, "Video Starts"],
     )
     df_creative_final = df_creative_final[creative_columns].copy()
-
-    assert list(df_creative_final.columns) == creative_columns
     log("Creative Level breakdown aggregation completed.")
 
-    # --------------------------------------------------------
-    # 12. DEVICE & COUNTRY (5 blank rows)
-    # --------------------------------------------------------
-    df_device = pd.DataFrame({
-        "Device": [""] * 5,
-        "Impressions": [0] * 5,
-        "Clicks": [0] * 5,
-        "CTR": [0] * 5,
-    })
+    df_device = pd.DataFrame({"Device": [""] * 5, "Impressions": [0] * 5, "Clicks": [0] * 5, "CTR": [0] * 5})
+    df_country = pd.DataFrame({"Country": [""] * 5, "Impressions": [0] * 5, "Clicks": [0] * 5, "CTR": [0] * 5})
 
-    df_country = pd.DataFrame({
-        "Country": [""] * 5,
-        "Impressions": [0] * 5,
-        "Clicks": [0] * 5,
-        "CTR": [0] * 5,
-    })
-
-    # --------------------------------------------------------
-    # 13. BUILD WORKBOOK - COPY HEADER (rows 1-8) EXACTLY AS UPLOADED
-    # --------------------------------------------------------
     src_wb = load_workbook(src())
     src_ws = src_wb["Performance Report"]
-
     src_wb_values = load_workbook(src(), data_only=True)
     src_ws_values = src_wb_values["Performance Report"]
-
     wb = Workbook()
     ws = wb.active
     ws.title = "Performance Report"
     ws.sheet_view.showGridLines = False
-
     HEADER_ROWS = 8
 
     for row in src_ws.iter_rows(min_row=1, max_row=HEADER_ROWS, max_col=src_ws.max_column):
         for cell in row:
             calc_value = src_ws_values.cell(row=cell.row, column=cell.column).value
             raw_value = cell.value
-
             if calc_value is not None:
                 value = calc_value
             elif isinstance(raw_value, str) and raw_value.startswith("="):
                 value = None
             else:
                 value = raw_value
-
             new_cell = ws.cell(row=cell.row, column=cell.column, value=to_excel_safe(value))
             copy_cell_style(cell, new_cell)
 
     for merged_range in src_ws.merged_cells.ranges:
         if merged_range.min_row <= HEADER_ROWS:
             ws.merge_cells(str(merged_range))
-
     for col_letter, dim in src_ws.column_dimensions.items():
         if dim.width:
             ws.column_dimensions[col_letter].width = dim.width
-
     for r in range(1, HEADER_ROWS + 1):
         if src_ws.row_dimensions[r].height:
             ws.row_dimensions[r].height = src_ws.row_dimensions[r].height
@@ -868,17 +719,13 @@ def build_report(file_bytes, currency_choice="1", log=print):
     proposal_names = proposal_names[proposal_names.ne("") & proposal_names.ne("Total")]
     proposal_ids = df_main_final["Proposal ID"].dropna().astype(str).str.strip()
     proposal_ids = proposal_ids[proposal_ids.ne("") & proposal_ids.ne("Total")]
-
     fallback_proposal_name = proposal_names.iloc[0] if not proposal_names.empty else None
     fallback_proposal_id = proposal_ids.iloc[0] if not proposal_ids.empty else None
-
     fill_blank_header_value("Report Proposal Name", fallback_proposal_name)
     fill_blank_header_value("Report Proposal ID", fallback_proposal_id)
-
     campaign_ends = pd.to_datetime(df_main["Campaign End"], errors="coerce").dropna()
     fallback_end = campaign_ends.max() if not campaign_ends.empty else None
     fill_blank_header_value("Report End Date", fallback_end.date() if fallback_end is not None else None)
-
     report_proposal_name = header_label_value(ws, "Report Proposal Name") or fallback_proposal_name
     report_proposal_id = header_label_value(ws, "Report Proposal ID") or fallback_proposal_id
     report_end_date = (
@@ -886,30 +733,17 @@ def build_report(file_bytes, currency_choice="1", log=print):
         or header_label_value(ws, "Report End")
         or (fallback_end.date() if fallback_end is not None else None)
     )
-
-    name_part = as_filename_token(report_proposal_name) or "Report"
-    id_part = as_filename_token(report_proposal_id) or "ID"
-    end_part = as_filename_date(report_end_date) or "EndDate"
-    download_name = f"{name_part}_{id_part}_{end_part}.xlsx"
+    download_name = (
+        f"{as_filename_token(report_proposal_name) or 'Report'}_"
+        f"{as_filename_token(report_proposal_id) or 'ID'}_"
+        f"{as_filename_date(report_end_date) or 'EndDate'}.xlsx"
+    )
 
     start_row = HEADER_ROWS + 1
-
     write_dataframe(ws, df_main_final, start_row=start_row)
     main_header_row = start_row
     main_data_start = start_row + 1
     main_data_end = start_row + len(df_main_final)
-
-    main_sum_columns = [
-        "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
-        "Clicks", "Video Starts", "Video 25", "Video 50", "Video 75",
-        "Video Completions", "Net Cost", "Campaign Budget Delivered",
-        "Campaign Budget Remaining",
-    ]
-    main_ratio_pairs = [
-        ("CTR", "Clicks", "Delivery Impressions"),
-        ("Video Start Rate", "Video Starts", "Delivery Impressions"),
-        ("Video Completion Rate", "Video Completions", "Video Starts"),
-    ]
     main_sumif_rules = []
     if has_vcpm:
         main_sumif_rules = [
@@ -927,18 +761,21 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 "divide_by": "Delivery Impressions",
             },
         ]
-
     apply_excel_totals(
-        ws,
-        header_row=main_header_row,
-        data_start=main_data_start,
-        data_end=main_data_end,
-        sum_columns=main_sum_columns,
-        ratio_pairs=main_ratio_pairs,
+        ws, header_row=main_header_row, data_start=main_data_start, data_end=main_data_end,
+        sum_columns=[
+            "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
+            "Clicks", "Video Starts", "Video 25", "Video 50", "Video 75",
+            "Video Completions", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
+        ],
+        ratio_pairs=[
+            ("CTR", "Clicks", "Delivery Impressions"),
+            ("Video Start Rate", "Video Starts", "Delivery Impressions"),
+            ("Video Completion Rate", "Video Completions", "Video Starts"),
+        ],
         max_columns=["Campaign Length"],
         sumif_rules=main_sumif_rules,
     )
-
     if has_special:
         special_start = main_data_end + 4
         write_dataframe(ws, df_special_final, start_row=special_start)
@@ -946,10 +783,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
         special_data_start = special_start + 1
         special_data_end = special_start + len(df_special_final)
         apply_excel_totals(
-            ws,
-            header_row=special_header_row,
-            data_start=special_data_start,
-            data_end=special_data_end,
+            ws, header_row=special_header_row, data_start=special_data_start, data_end=special_data_end,
             sum_columns=[
                 "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
                 "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
@@ -959,48 +793,35 @@ def build_report(file_bytes, currency_choice="1", log=print):
 
     ws_cl = wb.create_sheet("Creative Level")
     write_dataframe(ws_cl, df_creative_original.dropna(how="all"), start_row=1)
-
     ws_bd = wb.create_sheet("Creative Level breakdown")
     write_dataframe(ws_bd, df_creative_final, start_row=1)
     if len(df_creative_final) >= 1:
         apply_excel_totals(
-            ws_bd,
-            header_row=1,
-            data_start=2,
-            data_end=1 + len(df_creative_final),
+            ws_bd, header_row=1, data_start=2, data_end=1 + len(df_creative_final),
             sum_columns=sum_metric_columns,
             ratio_pairs=[
                 ("CTR", "Clicks", "Delivered Impressions"),
                 ("Video Completions Rate", "Video Completions", "Video Starts"),
             ],
         )
-
     ws_dev = wb.create_sheet("Device")
     write_dataframe(ws_dev, df_device, start_row=1)
-
     ws_cty = wb.create_sheet("Country")
     write_dataframe(ws_cty, df_country, start_row=1)
-
     src_wb.close()
     src_wb_values.close()
 
-    # --------------------------------------------------------
-    # 14. STYLING
-    # --------------------------------------------------------
     def format_table(ws, header_row, data_start, data_end,
                      percentage_columns=None, integer_columns=None,
                      currency_columns=None, date_columns=None,
                      center_columns=None, force_total_fill_columns=None,
                      wide_columns=None, has_total_row=False):
-
         percentage_columns = percentage_columns or []
         integer_columns = integer_columns or []
         currency_columns = currency_columns or []
         date_columns = date_columns or []
         center_columns = center_columns or []
-        force_total_fill_columns = force_total_fill_columns or []
         wide_columns = wide_columns or {}
-
         for col_num in range(1, ws.max_column + 1):
             cell = ws.cell(row=header_row, column=col_num)
             if cell.value is not None:
@@ -1008,7 +829,6 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 cell.font = header_font
                 cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                 cell.border = table_border
-
         normal_end = data_end - 1 if has_total_row else data_end
         for row_num in range(data_start, normal_end + 1):
             for col_num in range(1, ws.max_column + 1):
@@ -1018,12 +838,9 @@ def build_report(file_bytes, currency_choice="1", log=print):
                     cell.font = black_font
                     cell.alignment = Alignment(horizontal="left", vertical="center")
                     cell.border = table_border
-
         if has_total_row:
             header_map_temp = {cell.value: cell.column for cell in ws[header_row] if cell.value is not None}
-            no_total_box = {
-                "Proposal ID", "Proposal Name", "Campaign Start", "Campaign End", "Line Item ID",
-            }
+            no_total_box = {"Proposal ID", "Proposal Name", "Campaign Start", "Campaign End", "Line Item ID"}
             empty_border = Border()
             empty_fill = PatternFill(fill_type=None)
             for col_name, col_num in header_map_temp.items():
@@ -1038,39 +855,27 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 cell.font = total_font
                 cell.border = table_border
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-
         header_map = {cell.value: cell.column for cell in ws[header_row] if cell.value is not None}
-
         for col_name in integer_columns:
             if col_name in header_map:
-                col = header_map[col_name]
                 for r in range(data_start, data_end + 1):
-                    ws.cell(row=r, column=col).number_format = "#,##0"
-
+                    ws.cell(row=r, column=header_map[col_name]).number_format = "#,##0"
         for col_name in percentage_columns:
             if col_name in header_map:
-                col = header_map[col_name]
                 for r in range(data_start, data_end + 1):
-                    ws.cell(row=r, column=col).number_format = "0.00%"
-
+                    ws.cell(row=r, column=header_map[col_name]).number_format = "0.00%"
         for col_name in currency_columns:
             if col_name in header_map:
-                col = header_map[col_name]
                 for r in range(data_start, data_end + 1):
-                    ws.cell(row=r, column=col).number_format = currency_format
-
+                    ws.cell(row=r, column=header_map[col_name]).number_format = currency_format
         for col_name in date_columns:
             if col_name in header_map:
-                col = header_map[col_name]
                 for r in range(data_start, data_end + 1):
-                    ws.cell(row=r, column=col).number_format = "m/d/yyyy"
-
+                    ws.cell(row=r, column=header_map[col_name]).number_format = "m/d/yyyy"
         for col_name in center_columns:
             if col_name in header_map:
-                col = header_map[col_name]
                 for r in range(data_start, data_end + 1):
-                    ws.cell(row=r, column=col).alignment = Alignment(horizontal="center", vertical="center")
-
+                    ws.cell(row=r, column=header_map[col_name]).alignment = Alignment(horizontal="center", vertical="center")
         for col_num in range(1, ws.max_column + 1):
             letter = get_column_letter(col_num)
             max_len = 0
@@ -1079,22 +884,18 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 if val is not None:
                     max_len = max(max_len, len(str(val)))
             ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 45)
-
         for col_name, width in wide_columns.items():
             if col_name in header_map:
                 ws.column_dimensions[get_column_letter(header_map[col_name])].width = width
-
         ws.row_dimensions[header_row].height = 30
 
     main_percentage = ["CTR", "CTR Benchmark", "Delivery", "Video Start Rate", "Video Completion Rate"]
     main_integer = [
         "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
-        "Clicks", "Video Starts", "Video 25", "Video 50", "Video 75",
-        "Video Completions", "Campaign Length",
+        "Clicks", "Video Starts", "Video 25", "Video 50", "Video 75", "Video Completions", "Campaign Length",
     ]
     main_center = main_integer + main_percentage + [
-        "Contracted Rate", "Campaign Type", "Net Cost",
-        "Campaign Budget Delivered", "Campaign Budget Remaining",
+        "Contracted Rate", "Campaign Type", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
     ]
     if has_vcpm:
         main_percentage.append("Total Active View % Viewable Impressions")
@@ -1103,75 +904,46 @@ def build_report(file_bytes, currency_choice="1", log=print):
             "Total Active View Viewable Impressions",
             "Total Active View % Viewable Impressions",
         ])
-
     format_table(
-        ws=ws,
-        header_row=main_header_row,
-        data_start=main_data_start,
-        data_end=main_data_end,
-        percentage_columns=main_percentage,
-        integer_columns=main_integer,
+        ws=ws, header_row=main_header_row, data_start=main_data_start, data_end=main_data_end,
+        percentage_columns=main_percentage, integer_columns=main_integer,
         currency_columns=["Contracted Rate", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining"],
-        date_columns=["Campaign Start", "Campaign End"],
-        center_columns=main_center,
-        force_total_fill_columns=["CTR Benchmark", "Contracted Rate", "Campaign Type", "Video Completion Rate"],
-        wide_columns={"Proposal Name": 45, "Line Item Name": 55},
-        has_total_row=True,
+        date_columns=["Campaign Start", "Campaign End"], center_columns=main_center,
+        wide_columns={"Proposal Name": 45, "Line Item Name": 55}, has_total_row=True,
     )
-
     if has_vcpm:
         paint_black_columns(
-            ws,
-            header_row=main_header_row,
-            data_start=main_data_start,
-            data_end=main_data_end,
-            column_names=[
-                "Total Active View Viewable Impressions",
-                "Total Active View % Viewable Impressions",
-            ],
+            ws, header_row=main_header_row, data_start=main_data_start, data_end=main_data_end,
+            column_names=["Total Active View Viewable Impressions", "Total Active View % Viewable Impressions"],
         )
-
     header_map = {cell.value: cell.column for cell in ws[main_header_row] if cell.value is not None}
     for col_name in ["CTR Benchmark", "Video Completion Rate"]:
         if col_name in header_map:
-            col = header_map[col_name]
             for r in range(main_data_start, main_data_end + 1):
-                ws.cell(row=r, column=col).border = table_border
-
+                ws.cell(row=r, column=header_map[col_name]).border = table_border
     for col_name in ["Delivery", "CTR"]:
         if col_name in header_map:
-            col = header_map[col_name]
             for r in range(main_data_start, main_data_end + 1):
-                ws.cell(row=r, column=col).number_format = "0.00%"
-
+                ws.cell(row=r, column=header_map[col_name]).number_format = "0.00%"
     if has_special:
         format_table(
-            ws=ws,
-            header_row=special_header_row,
-            data_start=special_data_start,
-            data_end=special_data_end,
+            ws=ws, header_row=special_header_row, data_start=special_data_start, data_end=special_data_end,
             percentage_columns=["Delivery"],
             integer_columns=["Contracted Impressions", "Delivery Impressions", "Billable Impressions", "Campaign Length"],
             currency_columns=["Contracted Rate", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining"],
             date_columns=["Campaign Start", "Campaign End"],
             center_columns=[
-                "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
-                "Delivery", "Contracted Rate", "Campaign Type", "Net Cost",
-                "Campaign Budget Delivered", "Campaign Budget Remaining", "Campaign Length",
+                "Contracted Impressions", "Delivery Impressions", "Billable Impressions", "Delivery",
+                "Contracted Rate", "Campaign Type", "Net Cost", "Campaign Budget Delivered",
+                "Campaign Budget Remaining", "Campaign Length",
             ],
-            force_total_fill_columns=["Contracted Rate", "Campaign Type"],
-            wide_columns={"Proposal Name": 45, "Line Item Name": 55},
-            has_total_row=True,
+            wide_columns={"Proposal Name": 45, "Line Item Name": 55}, has_total_row=True,
         )
         special_header_map = {cell.value: cell.column for cell in ws[special_header_row] if cell.value is not None}
         if "Delivery" in special_header_map:
-            col = special_header_map["Delivery"]
             for r in range(special_data_start, special_data_end + 1):
-                ws.cell(row=r, column=col).number_format = "0.00%"
+                ws.cell(row=r, column=special_header_map["Delivery"]).number_format = "0.00%"
 
-    # --------------------------------------------------------
-    # 15. FORMAT CREATIVE LEVEL (simple)
-    # --------------------------------------------------------
     ws_cl.sheet_view.showGridLines = False
     for col in range(1, ws_cl.max_column + 1):
         cell = ws_cl.cell(row=1, column=col)
@@ -1180,7 +952,6 @@ def build_report(file_bytes, currency_choice="1", log=print):
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = table_border
-
     for r in range(2, ws_cl.max_row + 1):
         for c in range(1, ws_cl.max_column + 1):
             cell = ws_cl.cell(row=r, column=c)
@@ -1189,7 +960,6 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 cell.font = black_font
                 cell.alignment = Alignment(horizontal="left", vertical="center")
                 cell.border = table_border
-
     for c in range(1, ws_cl.max_column + 1):
         letter = get_column_letter(c)
         max_len = 0
@@ -1200,19 +970,14 @@ def build_report(file_bytes, currency_choice="1", log=print):
         ws_cl.column_dimensions[letter].width = min(max(max_len + 2, 12), 45)
     ws_cl.row_dimensions[1].height = 30
 
-    # --------------------------------------------------------
-    # 16. FORMAT CREATIVE LEVEL BREAKDOWN
-    # --------------------------------------------------------
     ws_bd.sheet_view.showGridLines = False
     breakdown_header_map = {cell.value: cell.column for cell in ws_bd[1] if cell.value is not None}
-
     for col in range(1, ws_bd.max_column + 1):
         cell = ws_bd.cell(row=1, column=col)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = table_border
-
     for r in range(2, ws_bd.max_row + 1):
         is_total = str(ws_bd.cell(row=r, column=3).value).strip().lower() == "total"
         for c in range(1, ws_bd.max_column + 1):
@@ -1223,45 +988,33 @@ def build_report(file_bytes, currency_choice="1", log=print):
             cell.alignment = Alignment(horizontal="left", vertical="center")
             if is_total and c in [breakdown_header_map.get("Report Start"), breakdown_header_map.get("Line Item Name")]:
                 cell.value = ""
-
     for col_name in ["CTR", "Video Completions Rate"]:
         if col_name in breakdown_header_map:
-            col = breakdown_header_map[col_name]
             for r in range(2, ws_bd.max_row + 1):
-                ws_bd.cell(row=r, column=col).number_format = "0.00%"
-
+                ws_bd.cell(row=r, column=breakdown_header_map[col_name]).number_format = "0.00%"
     for col_name in [
-        "Delivered Impressions", "Third Party Impressions", "Clicks",
-        "Third Party Clicks", "Video Starts", "Video 25", "Video 50",
-        "Video 75", "Video Completions",
+        "Delivered Impressions", "Third Party Impressions", "Clicks", "Third Party Clicks",
+        "Video Starts", "Video 25", "Video 50", "Video 75", "Video Completions",
     ]:
         if col_name in breakdown_header_map:
-            col = breakdown_header_map[col_name]
             for r in range(2, ws_bd.max_row + 1):
-                ws_bd.cell(row=r, column=col).number_format = "#,##0"
-
+                ws_bd.cell(row=r, column=breakdown_header_map[col_name]).number_format = "#,##0"
     if "Campaign Budget Delivered" in breakdown_header_map:
-        col = breakdown_header_map["Campaign Budget Delivered"]
         for r in range(2, ws_bd.max_row + 1):
-            ws_bd.cell(row=r, column=col).number_format = currency_format
-
+            ws_bd.cell(row=r, column=breakdown_header_map["Campaign Budget Delivered"]).number_format = currency_format
     if "Report Start" in breakdown_header_map:
-        col = breakdown_header_map["Report Start"]
         for r in range(2, ws_bd.max_row + 1):
-            cell = ws_bd.cell(row=r, column=col)
+            cell = ws_bd.cell(row=r, column=breakdown_header_map["Report Start"])
             if cell.value not in (None, ""):
                 cell.number_format = "m/d/yyyy"
-
     for col_name in [
         "Delivered Impressions", "Third Party Impressions", "Clicks", "Third Party Clicks",
         "Video Starts", "Video 25", "Video 50", "Video 75", "Video Completions",
         "CTR", "Video Completions Rate", "Campaign Budget Delivered",
     ]:
         if col_name in breakdown_header_map:
-            col = breakdown_header_map[col_name]
             for r in range(2, ws_bd.max_row + 1):
-                ws_bd.cell(row=r, column=col).alignment = Alignment(horizontal="center", vertical="center")
-
+                ws_bd.cell(row=r, column=breakdown_header_map[col_name]).alignment = Alignment(horizontal="center", vertical="center")
     for c in range(1, ws_bd.max_column + 1):
         letter = get_column_letter(c)
         max_len = 0
@@ -1270,15 +1023,11 @@ def build_report(file_bytes, currency_choice="1", log=print):
             if val is not None:
                 max_len = max(max_len, len(str(val)))
         ws_bd.column_dimensions[letter].width = min(max(max_len + 2, 12), 45)
-
     for col_name in ["Line Item Name", "Creative Name"]:
         if col_name in breakdown_header_map:
             ws_bd.column_dimensions[get_column_letter(breakdown_header_map[col_name])].width = 45
     ws_bd.row_dimensions[1].height = 30
 
-    # --------------------------------------------------------
-    # 17. FORMAT DEVICE & COUNTRY
-    # --------------------------------------------------------
     for sheet in [ws_dev, ws_cty]:
         sheet.sheet_view.showGridLines = False
         for c in range(1, 5):
@@ -1287,7 +1036,6 @@ def build_report(file_bytes, currency_choice="1", log=print):
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = table_border
-
         for r in range(2, 7):
             for c in range(1, 5):
                 cell = sheet.cell(row=r, column=c)
@@ -1295,101 +1043,149 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 cell.fill = white_fill
                 cell.font = black_font
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-
-        for r in range(2, 7):
             sheet.cell(row=r, column=2).number_format = "#,##0"
             sheet.cell(row=r, column=3).number_format = "#,##0"
             ctr_cell = sheet.cell(row=r, column=4)
-            ctr_cell.value = f'=IF(B{r}=0,0,C{r}/B{r})'
+            ctr_cell.value = f"=IF(B{r}=0,0,C{r}/B{r})"
             ctr_cell.number_format = "0.00%"
-
         sheet.column_dimensions["A"].width = 18
         sheet.column_dimensions["B"].width = 15
         sheet.column_dimensions["C"].width = 12
         sheet.column_dimensions["D"].width = 12
         sheet.row_dimensions[1].height = 30
 
-    # --------------------------------------------------------
-    # 18. SAVE (to memory instead of /content) & VERIFY
-    # --------------------------------------------------------
     buffer = io.BytesIO()
     wb.save(buffer)
     output_bytes = buffer.getvalue()
-
     check_wb = load_workbook(io.BytesIO(output_bytes), read_only=True)
     expected = ["Performance Report", "Creative Level", "Creative Level breakdown", "Device", "Country"]
     missing = [s for s in expected if s not in check_wb.sheetnames]
     check_wb.close()
     if missing:
         raise RuntimeError("Missing sheets: " + ", ".join(missing))
-
     log("FINAL REPORT CREATED SUCCESSFULLY")
     log("Header block (rows 1-8 + logo) copied from source file")
     log("Report Proposal Name / ID filled only if source is blank")
     log("Delivery column = user-uploaded values only")
     log(f"Download name: {download_name}")
-
     return output_bytes, download_name, df_creative_final
 
 
-# ============================================================
-# 4. STREAMLIT UI
-# ============================================================
-
-st.set_page_config(page_title="Performance Report Builder", page_icon="📊", layout="wide")
-
-st.title("📊 Performance Report + Creative Level Breakdown")
-st.caption(
-    "Upload the source Excel (needs sheets **Performance Report** and **Creative Level**, "
-    "data starting from row 9) and get the final formatted report."
+st.set_page_config(page_title="Performance Report", layout="wide", initial_sidebar_state="collapsed")
+st.markdown(
+    """
+    <link href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@500;700;800&display=swap" rel="stylesheet">
+    <style>
+    html, body, [class*="css"], .stApp, .stMarkdown, label, p, h1, h2, h3, span, div {
+        font-family: "Libre Franklin", Helvetica, Arial, sans-serif;
+    }
+    .stApp { background: #FFE500; }
+    .block-container { padding-top: 1.2rem; max-width: 1180px; }
+    header[data-testid="stHeader"] { background: transparent; }
+    #MainMenu, footer { visibility: hidden; }
+    .topbar {
+        display: flex; align-items: baseline; justify-content: space-between;
+        border-bottom: 2px solid #000; padding-bottom: 14px; margin-bottom: 28px;
+    }
+    .wordmark { color: #000; font-weight: 800; font-size: 1.55rem; line-height: 1; }
+    .wordmark span { display: block; font-size: 0.72rem; letter-spacing: 0.22em; margin-top: 4px; }
+    .nav { color: #000; font-weight: 800; font-size: 0.78rem; letter-spacing: 0.14em; }
+    .panel h2 { color: #fff !important; font-weight: 800; font-size: 1.7rem; margin: 0 0 8px 0; }
+    .panel p { color: #fff !important; font-weight: 500; margin: 0 0 18px 0; }
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
+        background: #000; padding: 28px 22px 18px 22px;
+    }
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child label p {
+        color: #FFE500 !important;
+    }
+    div[data-testid="stFileUploader"] section { background: #111; border: 1px solid #FFE500; }
+    div[data-testid="stFileUploader"] label,
+    div[data-testid="stFileUploader"] span,
+    div[data-testid="stFileUploader"] small { color: #FFE500 !important; font-weight: 700 !important; }
+    div[data-baseweb="select"] > div { background: #000; color: #FFE500; border-color: #000; font-weight: 700; }
+    .stButton > button, .stDownloadButton > button {
+        background: #FFE500; color: #000; font-weight: 800; border: 2px solid #FFE500;
+        border-radius: 999px; letter-spacing: 0.08em; width: 100%;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        background: #000; color: #FFE500; border-color: #FFE500;
+    }
+    .log-title { color: #000; font-weight: 800; font-size: 1.7rem; margin: 0; }
+    .log-rule { border: 0; border-top: 1px solid #000; margin: 8px 0 16px 0; }
+    div[data-testid="stTextArea"] textarea {
+        background: #111 !important; color: #FFE500 !important; font-weight: 600 !important;
+        border: none !important; border-radius: 0 !important;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.markdown(
+    """
+    <div class="topbar">
+        <div class="wordmark">PERFORMANCE REPORT<span>ADVERTISING</span></div>
+        <div class="nav">BUILD &nbsp;&nbsp; DOWNLOAD &nbsp;&nbsp; LOG</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-with st.sidebar:
-    st.header("Settings")
+left, right = st.columns([0.92, 1.25], gap="large")
+with left:
+    st.markdown(
+        """
+        <div class="panel">
+            <h2>BUILD THE REPORT</h2>
+            <p>Upload the source workbook. Choose the currency, then build.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     currency_choice = st.selectbox(
-        "Currency",
+        "CURRENCY",
         options=list(CURRENCY_NAMES.keys()),
         format_func=lambda k: CURRENCY_NAMES[k],
         index=0,
     )
+    uploaded_file = st.file_uploader("SOURCE WORKBOOK", type=["xlsx", "xlsm"])
+    generate = st.button("BUILD REPORT")
 
-uploaded_file = st.file_uploader("Upload source Excel file", type=["xlsx", "xlsm"])
+with right:
+    st.markdown('<div class="log-title">RUN LOG</div><hr class="log-rule">', unsafe_allow_html=True)
 
-if uploaded_file is not None:
-    if st.button("Generate Report", type="primary"):
+if "result" not in st.session_state:
+    st.session_state["result"] = None
+if "log_text" not in st.session_state:
+    st.session_state["log_text"] = "Waiting for a workbook."
+
+if generate:
+    if uploaded_file is None:
+        st.session_state["result"] = None
+        st.session_state["log_text"] = "Upload an Excel file before building the report."
+    else:
         logs = []
         try:
             with st.spinner("Building report..."):
-                out_bytes, out_name, df_preview = build_report(
+                out_bytes, out_name, _preview = build_report(
                     uploaded_file.getvalue(), currency_choice, log=logs.append
                 )
-            st.session_state["result"] = {
-                "bytes": out_bytes,
-                "name": out_name,
-                "preview": df_preview,
-                "logs": logs,
-            }
-        except ValueError as e:
-            st.session_state.pop("result", None)
-            st.error(str(e))
-        except Exception as e:
-            st.session_state.pop("result", None)
-            st.error(f"Something went wrong: {e}")
-            st.exception(e)
-else:
-    st.session_state.pop("result", None)
+            st.session_state["result"] = {"bytes": out_bytes, "name": out_name}
+            st.session_state["log_text"] = "\n".join(str(line) for line in logs) or "No output."
+        except Exception as exc:
+            st.session_state["result"] = None
+            st.session_state["log_text"] = "\n".join(str(line) for line in logs)
+            if st.session_state["log_text"]:
+                st.session_state["log_text"] += "\n\n"
+            st.session_state["log_text"] += f"ERROR: {exc}"
 
-result = st.session_state.get("result")
-if result:
-    st.success("Report created successfully.")
-    st.download_button(
-        label=f"⬇️ Download {result['name']}",
-        data=result["bytes"],
-        file_name=result["name"],
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    with st.expander("Processing log"):
-        for line in result["logs"]:
-            st.write(line)
-    with st.expander("Preview: Creative Level breakdown", expanded=False):
-        st.dataframe(result["preview"], use_container_width=True)
+with right:
+    st.text_area("Final print output", value=st.session_state["log_text"], height=340, label_visibility="collapsed")
+    result = st.session_state.get("result")
+    if result:
+        st.download_button(
+            label="DOWNLOAD REPORT",
+            data=result["bytes"],
+            file_name=result["name"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
