@@ -1,1329 +1,1395 @@
-"""
-KNNK SmartReport Engine — Production Ready
-Forecast approach: XGBoost with weekday-mean features (beats naive 86% of time)
-                   Prophet for weekly seasonality on longer campaigns
-Accuracy: fixed 3-day holdout (not 20%) for consistent comparison
-"""
-import streamlit as st
-import pandas as pd
+# ============================================================
+# FINAL PERFORMANCE REPORT + CREATIVE LEVEL BREAKDOWN
+# Streamlit version (converted from the Google Colab script)
+#
+# Run locally :  streamlit run app.py
+# ============================================================
+
 import io
+import os
+import re
+import tempfile
 import warnings
-warnings.filterwarnings("ignore")
+from datetime import datetime, date
+from copy import copy
+
 import numpy as np
-import gspread
-from google.oauth2.service_account import Credentials
-import logging
-logging.getLogger("prophet").setLevel(logging.ERROR)
-logging.getLogger("cmdstanpy").setLevel(logging.ERROR)
+import pandas as pd
+import streamlit as st
 
-# ── XGBoost
-XGB_OK = False; XGB_ERROR = ""
-try:
-    from xgboost import XGBRegressor
-    XGB_OK = True
-except ImportError:
-    XGB_ERROR = "XGBoost not installed. Add `xgboost` to requirements.txt and redeploy."
-except Exception as e:
-    XGB_ERROR = f"XGBoost failed to load: {e}"
+from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.drawing.image import Image as XLImage
 
-# ── Prophet
-PROPHET_OK = False; PROPHET_ERROR = ""
-try:
-    from prophet import Prophet
-    PROPHET_OK = True
-except ImportError:
-    PROPHET_ERROR = "Prophet not installed. Add `prophet` to requirements.txt and redeploy."
-except Exception as e:
-    PROPHET_ERROR = f"Prophet failed to load: {e}"
+warnings.filterwarnings("ignore", category=FutureWarning)
 
-EMPTY_DQ = {"n_days": 0, "is_sufficient": False, "warnings": [], "quality": "block"}
 
-# ── Page config
-st.set_page_config(page_title="KNNK SmartReport Engine", layout="wide",
-                   initial_sidebar_state="expanded")
-st.markdown("""
-<style>
-.section-title {
-    font-size:1.05rem; font-weight:700; border-bottom:2px solid currentColor;
-    opacity:.85; padding-bottom:.3rem; margin:1.1rem 0 .7rem; letter-spacing:.01em;
-}
-.chip {
-    display:inline-block; border:1px solid currentColor; border-radius:20px;
-    padding:.15rem .65rem; font-size:.75rem; font-weight:700;
-    letter-spacing:.06em; margin-bottom:.4rem; opacity:.75;
-}
-div[data-testid="stDataFrame"] { width:100% !important; }
-</style>
-""", unsafe_allow_html=True)
+# ============================================================
+# 0. CURRENCY OPTIONS (used by the sidebar selector)
+# ============================================================
 
-st.title("📊 KNNK SmartReport Engine")
-st.caption("GAM + DCM Reconciliation · Campaign Mapping · Insights · Forecast · Trend Analysis")
-st.divider()
-
-# ── Google Sheets
-SCOPE = ["https://www.googleapis.com/auth/spreadsheets",
-         "https://www.googleapis.com/auth/drive"]
-
-@st.cache_resource
-def _gs_client():
-    try:
-        creds = Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"], scopes=SCOPE)
-    except Exception:
-        creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPE)
-    return gspread.authorize(creds)
-
-@st.cache_resource
-def _gs_sheet(_c):
-    spreadsheet = _c.open("Reporting with KN & NK EDA App")
-    return spreadsheet.worksheet("Sheet1")
-
-try:
-    _gc = _gs_client(); sheet = _gs_sheet(_gc); SHEET_OK = True
-except Exception as e:
-    st.sidebar.error(f"Google Sheets: {e}"); SHEET_OK = False
-
-def load_mappings():
-    if not SHEET_OK: return {}
-    try:
-        out = {}
-        for r in sheet.get_all_records():
-            c = str(r.get("Campaign","")).strip()
-            k = str(r.get("Keyword","")).strip()
-            v = str(r.get("Value","")).strip()
-            if c and k: out.setdefault(c,{})[k] = v
-        return out
-    except Exception as e:
-        st.error(f"Mapping load error: {e}"); return {}
-
-def save_mappings(m):
-    if not SHEET_OK: return
-    try:
-        sheet.clear(); sheet.append_row(["Campaign","Keyword","Value"])
-        for camp, kv in m.items():
-            for k, v in kv.items(): sheet.append_row([camp, k, v])
-    except Exception as e:
-        st.error(f"Mapping save error: {e}")
-
-def pkey(platform, campaign): return f"{platform}::{campaign}"
-
-# ── Session state
-for _k, _v in [("mappings", None), ("show_fullview", False),
-                ("fullview_platform",""), ("fullview_campaign","")]:
-    if _k not in st.session_state:
-        st.session_state[_k] = load_mappings() if _k == "mappings" else _v
-
-LEGACY = {
-    pkey("GAM","Direct-NA-26-1632"): {
-        "Contextual Standard":"AV",
-        "Contextual Marquee":"Contextual Thematic Targeted Custom Units Marquee and Interlude",
-        "Thematic Interlude":"Contextual Thematic Targeted Custom Units Marquee and Interlude",
-        "Contextual Interlude":"Contextual Thematic Targeted Custom Units Marquee and Interlude",
-        "Thematic Marquee":"Contextual Thematic Targeted Custom Units Marquee and Interlude",
-        "Contextual YouTube":"Contextual Targeted Business Insider Video YouTube In-Stream",
-        "Contextual Onsite":"Contextual Targeted Business Insider Video Business Insider On-Site Pre-Roll",
-        "Audience YouTube":"Audience Targeted Business Insider Video YouTube In-Stream",
-        "1P Audience Onsite":"Audience Targeted Business Insider Video Business Insider On-Site Pre-Roll",
-        "3P Audience Onsite":"Audience Targeted Business Insider Video Business Insider On-Site Pre-Roll"},
-    pkey("GAM","Direct-NA-25-1625"): {
-        "Contextual_YouTube_National":"Contextual Targeted Business Insider YouTube In-Stream- Geo- National",
-        "Contextual_On-Site_National":"Contextual Targeted Business Insider On-Site Pre-Roll- Geo- National",
-        "AV_Contextual_Banners":"AV",
-        "Audience":"Audience Targeted Custom Units Marquee and Interlude Geo- National"},
+CURRENCY_FORMATS = {
+    "1": '"$"#,##0.00',
+    "2": '"€"#,##0.00',
+    "3": '"£"#,##0.00',
+    "4": '"₹"#,##0.00',
+    "5": '"C$"#,##0.00',
+    "6": '"A$"#,##0.00',
+    "7": '"¥"#,##0',
+    "8": '#,##0.00',
 }
 
-def get_map(platform, campaign):
-    pk = pkey(platform, campaign)
-    m  = st.session_state.mappings
-    return m[pk] if (pk in m and m[pk]) else LEGACY.get(pk, {})
+CURRENCY_NAMES = {
+    "1": "USD ($)",
+    "2": "EUR (€)",
+    "3": "GBP (£)",
+    "4": "INR (₹)",
+    "5": "CAD (C$)",
+    "6": "AUD (A$)",
+    "7": "JPY (¥)",
+    "8": "None (plain)",
+}
 
-DEFAULT_OPTIONS = ["Direct-NA-26-1632","Direct-NA-25-1625"]
-dynamic = [k.split("::",1)[1] for k in st.session_state.mappings if "::" in k]
-all_options = sorted(set(DEFAULT_OPTIONS + dynamic))
 
-# ── Total-row filter
-TOTAL_KW = ["total","grand total","subtotal","sum","overall"]
+# ============================================================
+# 1. STYLE OBJECTS (module level so helpers can use them)
+# ============================================================
 
-def remove_total_rows(df, col):
-    try:
-        if df.empty or col not in df.columns: return df.copy(), 0
-        s = df[col].fillna("").astype(str).str.strip().str.lower()
-        mask = s.apply(lambda v: any(v == k or v.startswith(k) for k in TOTAL_KW))
-        return df[~mask].copy(), int(mask.sum())
-    except Exception:
-        return df.copy(), 0
+header_fill = PatternFill(fill_type="solid", fgColor="D9D9D9")
+total_fill = PatternFill(fill_type="solid", fgColor="D9D9D9")
+white_fill = PatternFill(fill_type="solid", fgColor="FFFFFF")
+black_font = Font(name="Calibri", color="000000")
+header_font = Font(name="Calibri", bold=True, color="000000")
+total_font = Font(name="Calibri", bold=True, color="000000")
+thin_side = Side(style="thin", color="000000")
+table_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
-# ── File reader
-# ── Merged read_file:
-#    • GAM (and any non-DCM source): preserves the sheet-selector UI so users
-#      can pick "Ad Manager Report" or any other tab, matching original behaviour.
-#    • DCM: scans the first column for the row that contains "Campaign" and uses
-#      that row as the real header — handles DCM exports that have metadata rows
-#      above the actual data header.
-#    Both paths drop fully-blank rows and reset the index for clean downstream use.
-def read_file(uploaded, kp):
 
-    if uploaded is None:
+# ============================================================
+# 2. HELPER FUNCTIONS (unchanged from the Colab script)
+# ============================================================
+
+def clean_column_names(df):
+    df = df.copy()
+    df.columns = df.columns.astype(str).str.strip()
+    duplicate_names = df.columns[df.columns.duplicated(keep=False)].unique()
+    for col in duplicate_names:
+        duplicate_data = df.loc[:, df.columns == col]
+        combined = duplicate_data.bfill(axis=1).iloc[:, 0]
+        df = df.loc[:, df.columns != col]
+        df[col] = combined
+    return df
+
+
+def require_columns(df, required_columns, sheet_name):
+    missing = [col for col in required_columns if col not in df.columns]
+    if missing:
+        raise ValueError(f"{sheet_name} is missing required columns: " + ", ".join(missing))
+
+
+def safe_ratio(numerator, denominator):
+    numerator = pd.to_numeric(numerator, errors="coerce")
+    denominator = pd.to_numeric(denominator, errors="coerce")
+    if isinstance(denominator, pd.Series):
+        if not isinstance(numerator, pd.Series):
+            numerator = pd.Series(numerator, index=denominator.index)
+        else:
+            numerator = numerator.reindex(denominator.index)
+        result = numerator.div(denominator.where(denominator.notna() & denominator.ne(0)))
+        return result.replace([np.inf, -np.inf], np.nan)
+    if pd.isna(numerator) or pd.isna(denominator) or denominator == 0:
+        return np.nan
+    result = numerator / denominator
+    return result if np.isfinite(result) else np.nan
+
+
+def safe_ratio_zero(numerator, denominator):
+    numerator = pd.to_numeric(numerator, errors="coerce")
+    denominator = pd.to_numeric(denominator, errors="coerce")
+    if isinstance(denominator, pd.Series):
+        if not isinstance(numerator, pd.Series):
+            numerator = pd.Series(numerator, index=denominator.index)
+        else:
+            numerator = numerator.reindex(denominator.index)
+        result = numerator.div(denominator.where(denominator.notna() & denominator.ne(0)))
+        return result.replace([np.inf, -np.inf], np.nan).fillna(0)
+    if pd.isna(numerator) or pd.isna(denominator) or denominator == 0:
+        return 0
+    result = numerator / denominator
+    return result if np.isfinite(result) else 0
+
+
+def format_date_columns(df):
+    df = df.copy()
+    for col in ["Campaign Start", "Campaign End"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+    return df
+
+
+def convert_numeric_columns(df, columns):
+    df = df.copy()
+    for col in columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def clean_and_convert_numeric(series):
+    cleaned = (
+        series.astype("string").str.strip()
+        .str.replace(",", "", regex=False)
+        .str.replace(r"[$€£₹¥]", "", regex=True)
+        .str.replace(r"^[CA]\$", "", regex=True)
+        .str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+    )
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def clean_percentage_series(series):
+    s = series.astype("string").str.strip()
+    s = (
+        s.str.replace("%", "", regex=False)
+         .str.replace(",", "", regex=False)
+         .str.replace(r"[$€£₹¥]", "", regex=True)
+         .str.replace(r"^[CA]\$", "", regex=True)
+         .str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+    )
+    numeric = pd.to_numeric(s, errors="coerce")
+    # 1.13 is already 113%. Only whole-number percents such as 85 or 113.2 are divided.
+    mask_large = numeric > 2
+    numeric = numeric.where(~mask_large, numeric / 100)
+    return numeric
+
+
+def missing_values_to_zero(df):
+    df = df.copy()
+    missing_labels = {"na", "n/a", "nan", "none", "null", "<na>"}
+    for col in df.columns:
+        if pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]):
+            df[col] = df[col].astype(object)
+            missing_mask = df[col].map(
+                lambda value: isinstance(value, str) and value.strip().lower() in missing_labels
+            )
+            df.loc[missing_mask, col] = 0
+    return df.fillna(0)
+
+
+def first_existing_column(df, candidates):
+    for candidate in candidates:
+        if candidate in df.columns:
+            return candidate
+    return None
+
+
+def to_excel_safe(value):
+    if value is None:
         return None
-
-    try:
-
-        # =========================
-        # CSV FILES
-        # =========================
-        if uploaded.name.endswith(".csv"):
-
-            if kp.lower() == "dcm":
-
-                # Read raw CSV
-                raw_df = pd.read_csv(uploaded, header=None)
-
-                # Find actual header row
-                header_rows = raw_df[
-                    raw_df.iloc[:, 0].astype(str).str.contains(
-                        "Campaign",
-                        case=False,
-                        na=False
-                    )
-                ].index
-
-                if len(header_rows) > 0:
-
-                    header_row = int(header_rows[0])
-
-                    # Reset pointer
-                    uploaded.seek(0)
-
-                    # Read again with proper header
-                    df = pd.read_csv(uploaded, header=header_row)
-
-                else:
-
-                    uploaded.seek(0)
-                    df = pd.read_csv(uploaded)
-
-            else:
-
-                uploaded.seek(0)
-                df = pd.read_csv(uploaded)
-
-        # =========================
-        # EXCEL FILES
-        # =========================
-        else:
-
-            # ---------- DCM ----------
-            if kp.lower() == "dcm":
-
-                # Read raw sheet first
-                raw_df = pd.read_excel(uploaded, header=None)
-
-                # Detect header row
-                header_rows = raw_df[
-                    raw_df.iloc[:, 0].astype(str).str.contains(
-                        "Campaign",
-                        case=False,
-                        na=False
-                    )
-                ].index
-
-                if len(header_rows) > 0:
-
-                    header_row = int(header_rows[0])
-
-                    # Reset pointer
-                    uploaded.seek(0)
-
-                    # Read using detected header
-                    df = pd.read_excel(
-                        uploaded,
-                        header=header_row
-                    )
-
-                else:
-
-                    uploaded.seek(0)
-                    df = pd.read_excel(uploaded)
-
-            # ---------- GAM ----------
-            else:
-
-                xls = pd.ExcelFile(uploaded)
-
-                default_sheet = (
-                    "Ad Manager Report"
-                    if "Ad Manager Report" in xls.sheet_names
-                    else xls.sheet_names[0]
-                )
-
-                ch = st.selectbox(
-                    f"Sheet — {uploaded.name}",
-                    xls.sheet_names,
-                    index=xls.sheet_names.index(default_sheet),
-                    key=f"{kp}_sheet",
-                )
-
-                uploaded.seek(0)
-
-                df = pd.read_excel(
-                    uploaded,
-                    sheet_name=ch
-                )
-
-        # =========================
-        # CLEANUP
-        # =========================
-
-        # Remove empty rows
-        df = df.dropna(how="all")
-
-        # Remove unnamed columns
-        df = df.loc[
-            :,
-            ~df.columns.astype(str).str.contains("^Unnamed")
-        ]
-
-        # Reset index
-        df = df.reset_index(drop=True)
-
-        return df
-
-    except Exception as e:
-
-        st.error(f"Error reading file ({kp.upper()}): {e}")
+    if value is pd.NA or value is pd.NaT:
         return None
-
-# ── Core processing
-def process_data(df, platform, campaign, date_range=None):
     try:
-        n = df.copy()
-        try:
-            gm = n.astype(str).apply(
-                lambda c: c.str.contains("Grand Total", case=False, na=False)).any(axis=1)
-            n = n[~gm].reset_index(drop=True)
-        except Exception:
-            pass
-        if date_range and len(date_range)==2 and date_range[0] and date_range[1]:
-            dc = next((c for c in n.columns if "date" in c.lower()), None)
-            if dc:
-                try:
-                    n[dc] = pd.to_datetime(n[dc], errors="coerce")
-                    if hasattr(n[dc].dtype,"tz") and n[dc].dtype.tz:
-                        n[dc] = n[dc].dt.tz_localize(None)
-                    s = pd.to_datetime(str(date_range[0]))
-                    e = pd.to_datetime(str(date_range[1]))
-                    n = n[(n[dc]>=s)&(n[dc]<=e)].reset_index(drop=True)
-                except Exception as ex:
-                    st.warning(f"⚠️ {platform}: Date filter failed — {ex}")
-        if n.empty:
-            st.warning(f"⚠️ {platform}: No data remains after filters."); return None, None
-        n["Product"] = "Ignore"
-        if   "Line item"         in n.columns: col = "Line item"
-        elif "Package/Roadblock" in n.columns: col = "Package/Roadblock"
-        elif "Placement"         in n.columns: col = "Placement"
-        else:
-            st.warning(f"⚠️ {platform}: Required column not found."); return None, None
-        n[col] = n[col].fillna("").astype(str)
-        n, _   = remove_total_rows(n, col)
-        if n.empty:
-            st.warning(f"⚠️ {platform}: All rows were totals."); return None, None
-        if platform == "GAM":
-            ic = "Ad server impressions" if "Ad server impressions" in n.columns else "Impressions"
-            cc = "Ad server clicks"      if "Ad server clicks"      in n.columns else "Clicks"
-        else:
-            ic, cc = "Impressions", "Clicks"
-        if ic not in n.columns or cc not in n.columns:
-            st.warning(f"⚠️ {platform}: Metric columns not found."); return None, None
-        bef = len(n)
-        n   = n[~n[col].str.lower().str.contains("test", na=False)].reset_index(drop=True)
-        if bef-len(n): st.info(f"🧹 {platform}: Removed {bef-len(n)} test row(s)")
-        active = get_map(platform, campaign)
-        n["_cl"] = n[col].str.lower()
-        for k, v in active.items():
-            kc = str(k).strip().lower()
-            if kc: n.loc[n["_cl"].apply(lambda x: kc in x), "Product"] = v
-        n.drop(columns=["_cl"], inplace=True)
-        res = n.groupby("Product")[[ic,cc]].sum().reset_index()
-        res = res.rename(columns={ic:f"{platform}_Impressions", cc:f"{platform}_Clicks"})
-        return res, n
-    except Exception as ex:
-        st.error(f"❌ {platform}: {ex}"); return None, None
-
-def build_pivot(n_df, platform, key_suffix=""):
-    if n_df is None or "Product" not in n_df.columns: return None
-    nc = n_df.select_dtypes(include=["int64","float64"]).columns.tolist()
-    if not nc: return None
-    defs = [c for c in nc if any(kw in c.lower() for kw in ["impression","click","view","reach"])][:4]
-    sel  = st.multiselect(f"Metrics — {platform}", nc, default=defs or nc[:2],
-                          key=f"m_{platform}_{key_suffix}")
-    if not sel: return None
-    pv = n_df.groupby("Product")[sel].sum().reset_index()
-    pv = pv.rename(columns={"Ad server impressions":f"{platform}_Impressions",
-                             "Ad server clicks":f"{platform}_Clicks",
-                             "Impressions":f"{platform}_Impressions",
-                             "Clicks":f"{platform}_Clicks"})
-    ic, cc = f"{platform}_Impressions", f"{platform}_Clicks"
-    if ic in pv.columns and cc in pv.columns:
-        pv[f"{platform}_CTR (%)"] = (pv[cc]/pv[ic].replace(0,np.nan)*100).fillna(0).round(2)
-    tot = pv.select_dtypes(include="number").sum(); tot["Product"] = "TOTAL"
-    return pd.concat([pv, pd.DataFrame([tot])], ignore_index=True)
-
-def generate_insights(df, platform=""):
-    out = []
-    if df is None or df.empty: return out
-    gc = df.columns[0]
-    d  = df[~df[gc].astype(str).str.contains("total",case=False,na=False)].copy()
-    ic = next((c for c in d.columns if "impression" in c.lower()), None)
-    cc = next((c for c in d.columns if "click"      in c.lower()), None)
-    tc = next((c for c in d.columns if "ctr"        in c.lower()), None)
-    ti = d[ic].sum() if ic else 0; tk = d[cc].sum() if cc else 0
-    ag = d[tc].mean() if tc else 0
-    px = f"[{platform}] " if platform else ""
-    out.append(f"📊 {px}Total Impressions: {int(ti):,} | Total Clicks: {int(tk):,}")
-    if tc:
-        em = "🚀" if ag>2 else ("👍" if ag>1 else "⚠️")
-        lb = "Strong" if ag>2 else ("Moderate" if ag>1 else "Low")
-        out.append(f"{em} {px}{lb} avg CTR: {round(ag,2)}%")
-        bs = d.sort_values(tc,ascending=False).iloc[0]
-        ws = d.sort_values(tc,ascending=True).iloc[0]
-        out.append(f"🔥 {px}Top: {bs[gc]} ({round(bs[tc],2)}%)")
-        out.append(f"📉 {px}Lowest: {ws[gc]} ({round(ws[tc],2)}%)")
-        ln = ", ".join(d[d[tc]<ag][gc].astype(str).head(3))
-        hn = ", ".join(d[d[tc]>=ag][gc].astype(str).head(3))
-        if ln: out.append(f"📉 {px}Underperformers: {ln}")
-        if hn: out.append(f"🌟 {px}High performers: {hn}")
-    if ic and ti>0:
-        tr = d.sort_values(ic,ascending=False).iloc[0]
-        out.append(f"📈 {px}Highest impressions: {tr[gc]}")
-        sh = d[ic]/ti
-        if sh.max()>0.5: out.append(f"⚠️ {px}Heavy dependency on '{d.loc[sh.idxmax(),gc]}' (>50%)")
-    rec = ("💡 Improve creatives & targeting" if ag<1
-           else "💡 Optimize low performers, scale winners" if ag<2
-           else "💡 Scale top performers aggressively")
-    out.append(f"{px}{rec}")
-    return out
-
-# ================================================================
-# FORECASTING ENGINE
-#
-# WHY XGBoost beats naive:
-#   Ad delivery is dominated by weekday patterns. The key features are:
-#   1. weekday_mean   — average delivery for this day-of-week in training
-#   2. weekday_std    — volatility for this day-of-week
-#   3. rolling_mean_7 — recent 7-day average (trend signal)
-#   4. lag_1/lag_7    — yesterday and same-day-last-week
-#
-#   These directly encode what naive ignores: the difference between
-#   Monday (high delivery) and Saturday (low delivery).
-#
-# WHY FIXED 3-DAY HOLDOUT:
-#   20% of 13 days = 2 days. With 2 holdout points, one noisy day
-#   destroys the MAPE score regardless of how good the model is.
-#   Fixed 3-day holdout gives consistent, reliable accuracy scores.
-# ================================================================
-
-XGB_MIN = 7    # minimum days to run XGBoost
-PRO_MIN = 10   # minimum days to run Prophet
-
-def _make_dq(n_days, platform, model="xgb"):
-    mn = XGB_MIN if model=="xgb" else PRO_MIN
-    dq = {"n_days":n_days,"warnings":[],"is_sufficient":True,"quality":"good"}
-    if n_days < mn:
-        dq.update(quality="block",is_sufficient=False)
-        dq["warnings"].append(f"⛔ {platform}: Only **{n_days} day(s)**. Need ≥{mn}. Forecast blocked.")
-    elif n_days < 14:
-        dq["quality"]="warn"
-        dq["warnings"].append(f"⚠️ {platform}: **{n_days} days** — results are low reliability.")
-    elif n_days < 21:
-        dq["quality"]="caution"
-        dq["warnings"].append(f"💡 {platform}: **{n_days} days** — 21+ days gives best accuracy.")
-    return dq
-
-def _mape_acc(y_true, y_pred):
-    """
-    MAPE accuracy = 100 - MAPE.
-    Returns None only when fewer than 2 nonzero actuals exist.
-    Hard threshold of 2 — no floating-point arithmetic in the guard.
-    Identical result on every Python/numpy/pandas version.
-    """
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
-    valid  = y_true > 0
-    if int(valid.sum()) < 2:      # hard int — no float conversion
-        return None
-    mape = (np.abs(y_true[valid] - y_pred[valid]) / y_true[valid]).mean() * 100
-    return round(max(0.0, 100.0 - mape), 1)
-
-def _build_xgb_features(df: pd.DataFrame, date_col: str, val_col: str) -> pd.DataFrame:
-    """
-    Build feature matrix that encodes weekday patterns explicitly.
-    This is the primary reason XGBoost beats naive on ad delivery data.
-
-    Core insight: impression delivery on Monday ≠ impression delivery on Saturday.
-    Naive ignores this. XGBoost learns it from weekday_mean feature.
-    """
-    df = df.sort_values(date_col).reset_index(drop=True)
-    dates = pd.to_datetime(df[date_col])
-    vals  = df[val_col].values.astype(float)
-    n     = len(vals)
-
-    features = {
-        # Calendar signals
-        "day_of_week":  dates.dt.dayofweek.values,
-        "is_weekend":   (dates.dt.dayofweek >= 5).astype(int).values,
-        "is_monday":    (dates.dt.dayofweek == 0).astype(int).values,
-        "is_friday":    (dates.dt.dayofweek == 4).astype(int).values,
-        "day_index":    np.arange(n),
-        "month":        dates.dt.month.values,
-    }
-
-    # ── Weekday mean & std (most important features)
-    # For each row: what was the average delivery on this day-of-week in training?
-    wd_mean = np.zeros(n); wd_std = np.zeros(n)
-    global_mean = vals.mean()
-    for i in range(n):
-        dow   = dates.dt.dayofweek.iloc[i]
-        past  = vals[:i][dates.dt.dayofweek.iloc[:i] == dow]
-        wd_mean[i] = past.mean() if len(past) > 0 else global_mean
-        wd_std[i]  = past.std()  if len(past) > 1 else 0.0
-    features["weekday_mean"] = wd_mean
-    features["weekday_std"]  = wd_std
-
-    # ── Lag features (yesterday, same day last week)
-    gm = global_mean
-    features["lag_1"] = np.concatenate([[gm],    vals[:-1]])
-    features["lag_2"] = np.concatenate([[gm,gm], vals[:-2]])
-    features["lag_7"] = np.array([
-        vals[i-7] if i>=7 else gm for i in range(n)])
-
-    # ── Rolling means (short + medium term trend)
-    s = pd.Series(vals)
-    features["rolling_mean_3"] = s.shift(1).rolling(3,  min_periods=1).mean().fillna(gm).values
-    features["rolling_mean_7"] = s.shift(1).rolling(7,  min_periods=1).mean().fillna(gm).values
-    features["rolling_std_3"]  = s.shift(1).rolling(3,  min_periods=1).std().fillna(0).values
-    features["ewm_3"]          = s.shift(1).ewm(span=3, min_periods=1).mean().fillna(gm).values
-
-    return pd.DataFrame(features)
-
-def _weekday_mean_predict(train_dates, train_vals, test_dates):
-    """
-    Pure weekday-mean prediction — no random state, no pandas rolling.
-    For each test date: predict = mean of same day-of-week in training data.
-    Falls back to global training mean when no matching weekday exists.
-
-    WHY THIS IS USED FOR < 10 DAYS:
-      With only 4–7 training rows XGBoost rolling features (lag_7, rolling_mean_7)
-      are all filled with the global mean → every feature row looks identical →
-      XGBoost predicts the same value for all days → accuracy varies by machine
-      depending on how pandas fills NaN in rolling windows.
-
-    DETERMINISM GUARANTEE:
-      Pure Python + numpy arithmetic only. No pandas rolling, no random seeds.
-      Returns identical floats on any OS / Python / numpy / pandas version.
-    """
-    train_dates = list(pd.to_datetime(train_dates))
-    test_dates  = list(pd.to_datetime(test_dates))
-    train_vals  = np.asarray(train_vals, dtype=float)
-    global_mean = float(train_vals.mean())
-    preds = []
-    for td in test_dates:
-        same = [float(train_vals[i]) for i, d in enumerate(train_dates)
-                if d.dayofweek == td.dayofweek]
-        preds.append(float(np.mean(same)) if same else global_mean)
-    return np.array(preds, dtype=float)
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    return value
 
 
-def _xgb_holdout(grp, date_col, val_col, periods):
-    """
-    Fixed 3-day holdout accuracy measurement.
+def write_dataframe(ws, df, start_row=1):
+    for c_idx, col_name in enumerate(df.columns, start=1):
+        ws.cell(row=start_row, column=c_idx, value=str(col_name))
+    for r_offset, row in enumerate(df.itertuples(index=False, name=None), start=1):
+        for c_idx, value in enumerate(row, start=1):
+            ws.cell(row=start_row + r_offset, column=c_idx, value=to_excel_safe(value))
 
-    DUAL MODE — chosen by data size for maximum determinism:
 
-    n < 10 days  →  weekday-mean model
-        XGBoost features are unreliable with < 10 rows
-        (lag_7 all missing, rolling_mean_7 all identical).
-        Weekday-mean uses pure numpy — 100% same result on local & Cloud.
+def copy_cell_style(source_cell, target_cell):
+    if source_cell.has_style:
+        target_cell.font = copy(source_cell.font)
+        target_cell.border = copy(source_cell.border)
+        target_cell.fill = copy(source_cell.fill)
+        target_cell.number_format = source_cell.number_format
+        target_cell.protection = copy(source_cell.protection)
+        target_cell.alignment = copy(source_cell.alignment)
 
-    n >= 10 days →  XGBoost with nthread=1 + random_state=42
-        nthread=1 forces single-threaded float ops — eliminates the
-        race-condition differences between different CPU counts.
 
-    Returns (model_acc, naive_acc, n_holdout). All three values are
-    computed with the same method → comparison is always apples-to-apples.
-    """
-    try:
-        df = (grp[[date_col, val_col]].copy()
-              .assign(**{date_col: lambda x: pd.to_datetime(x[date_col], errors="coerce")})
-              .groupby(date_col)[val_col].sum()
-              .reset_index().sort_values(date_col).reset_index(drop=True))
-        n  = len(df)
-        nh = 3          # always fixed 3-day holdout
-        nt = n - nh
-        if nt < XGB_MIN:
-            return None, None, nh
+def header_label_value(worksheet, label):
+    target = label.strip().lower()
+    max_col = worksheet.max_column or 1
+    for r in range(1, 9):
+        for c in range(1, max_col + 1):
+            v = worksheet.cell(row=r, column=c).value
+            if isinstance(v, str) and v.strip().lower().startswith(target):
+                for cc in range(c + 1, max_col + 1):
+                    right = worksheet.cell(row=r, column=cc).value
+                    if right not in (None, ""):
+                        return right
+                return None
+    return None
 
-        y           = df[val_col].values.astype(float)
-        train_dates = pd.to_datetime(df[date_col].values[:nt])
-        test_dates  = pd.to_datetime(df[date_col].values[nt:])
 
-        if n < 10:
-            # Weekday-mean — fully deterministic on any machine
-            preds = _weekday_mean_predict(train_dates, y[:nt], test_dates)
-        else:
-            # XGBoost — deterministic via nthread=1 + fixed random_state
-            X = _build_xgb_features(df, date_col, val_col)
-            m = XGBRegressor(
-                n_estimators=500, max_depth=4, learning_rate=0.02,
-                subsample=0.9, colsample_bytree=0.9,
-                min_child_weight=1, gamma=0.05,
-                reg_alpha=0.05, reg_lambda=0.5,
-                random_state=42, nthread=1, verbosity=0)
-            m.fit(X.iloc[:nt], y[:nt], verbose=False)
-            preds = m.predict(X.iloc[nt:])
-
-        model_acc = _mape_acc(y[nt:], preds)
-        naive_acc = _mape_acc(y[nt:], np.full(nh, y[nt - 1]))
-        return model_acc, naive_acc, nh
-
-    except Exception:
-        return None, None, 3
-
-@st.cache_data(show_spinner=False)
-def forecast_xgb(n_df_json, product, periods, platform):
-    def _blk(r):
-        dq = dict(EMPTY_DQ); dq["warnings"]=[f"⛔ {platform}: {r}"]; return None,None,dq
-
-    if not XGB_OK: return _blk(XGB_ERROR)
-    try: n_df = pd.read_json(io.StringIO(n_df_json))
-    except Exception as ex: return _blk(f"Parse error — {ex}")
-
-    dc = next((c for c in n_df.columns if "date" in c.lower()), None)
-    if not dc: return _blk("No date column found.")
-    try: n_df[dc] = pd.to_datetime(n_df[dc], errors="coerce")
-    except Exception: return _blk("Date column unparseable.")
-
-    df = n_df[n_df["Product"]==product].copy()
-    if df.empty: return _blk(f"No rows for '{product}'.")
-
-    ic = next((c for c in df.columns if "impression" in c.lower()), None)
-    cc = next((c for c in df.columns if "click"      in c.lower()), None)
-    if not ic or not cc: return _blk("Impression/Click columns not found.")
-
-    grp = (df.groupby(dc)[[ic,cc]].sum()
-             .reset_index().sort_values(dc).reset_index(drop=True))
-    n_days = len(grp)
-
-    dq = _make_dq(n_days, platform, "xgb")
-    if not dq["is_sufficient"]: return None, None, dq
-
-    ia, in_, ih = _xgb_holdout(grp, dc, ic, periods)
-    ca, cn_, ch = _xgb_holdout(grp, dc, cc, periods)
-    accuracy = {"Impressions":ia,"Clicks":ca,
-                "imp_holdout_days":ih,"clk_holdout_days":ch,
-                "imp_naive":in_,"clk_naive":cn_}
-
-    xp = dict(n_estimators=500, max_depth=4, learning_rate=0.02,
-              subsample=0.9, colsample_bytree=0.9,
-              min_child_weight=1, gamma=0.05,
-              reg_alpha=0.05, reg_lambda=0.5,
-              random_state=42, nthread=1, verbosity=0)
-
-    # Weekday-mean mode for small datasets (< 10 days):
-    # XGBoost rolling/lag features collapse to global mean with few rows,
-    # producing inconsistent predictions across environments.
-    # Weekday-mean is 100% deterministic (pure numpy, no random state).
-    USE_WD_MEAN = (n_days < 10)
-
-    try:
-        yi = grp[ic].values.astype(float)
-        yc = grp[cc].values.astype(float)
-        all_dates = pd.to_datetime(grp[dc].values)
-
-        if USE_WD_MEAN:
-            # Pure weekday-mean — identical on every machine
-            mi = None; mc = None
-            ri = np.zeros(n_days)  # zero residuals → CI band = prediction ± 0
-            rc = np.zeros(n_days)
-        else:
-            Xi = _build_xgb_features(grp[[dc,ic]].rename(columns={ic:"v"}), dc, "v")
-            Xc = _build_xgb_features(grp[[dc,cc]].rename(columns={cc:"v"}), dc, "v")
-            mi = XGBRegressor(**xp); mc = XGBRegressor(**xp)
-            mi.fit(Xi, yi, verbose=False)
-            mc.fit(Xc, yc, verbose=False)
-            ri = yi - mi.predict(Xi)   # training residuals for bootstrap CI
-            rc = yc - mc.predict(Xc)
-
-        last_d = pd.to_datetime(grp[dc].max())
-        fdates = pd.date_range(last_d + pd.Timedelta(days=1), periods=periods)
-
-        # Rolling history for lag/rolling features
-        hist_i = list(yi); hist_c = list(yc)
-        gm_i = float(yi.mean()); gm_c = float(yc.mean())
-        dates_so_far = list(pd.to_datetime(grp[dc]))
-
-        rng = np.random.RandomState(42)
-        rows_i, rows_c = [], []
-
-        for fd in fdates:
-            dow = fd.dayofweek
-            n_s = len(hist_i)
-
-            def _feat_row(hist, gm):
-                h = np.array(hist, dtype=float)
-                # Weekday mean from history
-                ds = [dates_so_far[j].dayofweek for j in range(len(dates_so_far))]
-                wdv = [h[j] for j in range(len(h)) if j < len(ds) and ds[j]==dow]
-                wd_mean = float(np.mean(wdv)) if wdv else gm
-                wd_std  = float(np.std(wdv))  if len(wdv)>1 else 0.0
-                lag1 = h[-1]  if len(h)>=1 else gm
-                lag2 = h[-2]  if len(h)>=2 else gm
-                lag7 = h[-7]  if len(h)>=7 else gm
-                rm3  = h[-3:].mean() if len(h)>=3 else h.mean()
-                rm7  = h[-7:].mean() if len(h)>=7 else h.mean()
-                rs3  = h[-3:].std()  if len(h)>=3 else 0.0
-                n_e  = min(len(h),7)
-                wts  = np.array([0.5**k for k in range(n_e)])[::-1]
-                wts  /= wts.sum()
-                ewm  = float(np.dot(h[-n_e:], wts))
-                return {
-                    "day_of_week": dow, "is_weekend": int(dow>=5),
-                    "is_monday": int(dow==0), "is_friday": int(dow==4),
-                    "day_index": n_s, "month": fd.month,
-                    "weekday_mean": wd_mean, "weekday_std": wd_std,
-                    "lag_1": lag1, "lag_2": lag2, "lag_7": lag7,
-                    "rolling_mean_3": rm3, "rolling_mean_7": rm7,
-                    "rolling_std_3": rs3, "ewm_3": ewm
-                }
-
-            fi = _feat_row(hist_i, gm_i)
-            fc_r = _feat_row(hist_c, gm_c)
-
-            if USE_WD_MEAN:
-                # Weekday-mean prediction — deterministic
-                pi = float(_weekday_mean_predict(all_dates, yi, [fd])[0])
-                pc = float(_weekday_mean_predict(all_dates, yc, [fd])[0])
-            else:
-                pi = max(0.0, float(mi.predict(pd.DataFrame([fi]))[0]))
-                pc = max(0.0, float(mc.predict(pd.DataFrame([fc_r]))[0]))
-
-            bi = pi + rng.choice(ri, 500, replace=True)
-            bc = pc + rng.choice(rc, 500, replace=True)
-
-            rows_i.append({"Date": fd.date(),
-                           f"{platform}_Impressions":      round(pi),
-                           f"{platform}_Impressions_Low":  max(0,int(np.percentile(bi,10))),
-                           f"{platform}_Impressions_High": max(0,int(np.percentile(bi,90)))})
-            rows_c.append({"Date": fd.date(),
-                           f"{platform}_Clicks":       round(pc),
-                           f"{platform}_Clicks_Low":   max(0,int(np.percentile(bc,10))),
-                           f"{platform}_Clicks_High":  max(0,int(np.percentile(bc,90)))})
-
-            hist_i.append(pi); hist_c.append(pc)
-            dates_so_far.append(fd)
-
-        merged = pd.DataFrame(rows_i).merge(pd.DataFrame(rows_c), on="Date")
-        return merged, accuracy, dq
-
-    except Exception as ex:
-        dq["warnings"].append(f"⛔ {platform}: XGBoost error — {ex}")
-        return None, None, dq
-
-def _prp_holdout(grp, dc, vc, periods):
-    """
-    Prophet holdout accuracy.
-    Uses weekday-mean model when n < 14 (Prophet needs 2 full weeks to detect
-    weekly seasonality — with fewer rows it produces different results per machine
-    due to Stan MCMC sampling noise).
-    n >= 14: Prophet with fixed changepoint_prior_scale for reproducibility.
-    """
-    try:
-        df = (grp[[dc, vc]].copy()
-              .assign(**{dc: lambda x: pd.to_datetime(x[dc], errors="coerce")})
-              .groupby(dc)[vc].sum()
-              .reset_index().sort_values(dc).reset_index(drop=True))
-        n  = len(df); nh = 3; nt = n - nh
-        if nt < PRO_MIN:
-            return None, None, nh
-
-        y           = df[vc].values.astype(float)
-        train_dates = pd.to_datetime(df[dc].values[:nt])
-        test_dates  = pd.to_datetime(df[dc].values[nt:])
-
-        if n < 14:
-            # Weekday-mean fallback — deterministic on all machines
-            preds = _weekday_mean_predict(train_dates, y[:nt], test_dates)
-            ma    = _mape_acc(y[nt:], preds)
-        else:
-            dff   = df.rename(columns={dc: "ds", vc: "y"})
-            train = dff.iloc[:nt].copy()
-            test  = dff.iloc[nt:].copy()
-            m = Prophet(daily_seasonality=False, weekly_seasonality=True,
-                        yearly_seasonality=False, interval_width=0.80,
-                        changepoint_prior_scale=0.05)
-            m.fit(train)
-            fc  = m.predict(m.make_future_dataframe(periods=nh))
-            fc  = fc[fc["ds"].isin(test["ds"])][["ds", "yhat"]]
-            mg  = test.merge(fc, on="ds", how="inner")
-            ma  = _mape_acc(mg["y"].values, mg["yhat"].values)
-
-        na_ = _mape_acc(y[nt:], np.full(nh, y[nt - 1]))
-        return ma, na_, nh
-
-    except Exception:
-        return None, None, 3
-
-@st.cache_data(show_spinner=False)
-def forecast_prophet(n_df_json, product, periods, platform):
-    def _blk(r):
-        dq = dict(EMPTY_DQ); dq["warnings"]=[f"⛔ {platform}: {r}"]; return None,None,dq
-    if not PROPHET_OK: return _blk(PROPHET_ERROR)
-    try: n_df = pd.read_json(io.StringIO(n_df_json))
-    except Exception as ex: return _blk(f"Parse error — {ex}")
-    dc = next((c for c in n_df.columns if "date" in c.lower()), None)
-    if not dc: return _blk("No date column.")
-    try: n_df[dc] = pd.to_datetime(n_df[dc],errors="coerce")
-    except Exception: return _blk("Date column unparseable.")
-    df = n_df[n_df["Product"]==product].copy()
-    if df.empty: return _blk(f"No rows for '{product}'.")
-    ic = next((c for c in df.columns if "impression" in c.lower()),None)
-    cc = next((c for c in df.columns if "click"      in c.lower()),None)
-    if not ic or not cc: return _blk("Impression/Click columns not found.")
-    grp = (df.groupby(dc)[[ic,cc]].sum()
-             .reset_index().sort_values(dc).reset_index(drop=True))
-    n_days = len(grp)
-    dq = _make_dq(n_days, platform, "prophet")
-    if not dq["is_sufficient"]: return None, None, dq
-    ia,in_,ih = _prp_holdout(grp,dc,ic,periods)
-    ca,cn_,ch = _prp_holdout(grp,dc,cc,periods)
-    accuracy = {"Impressions":ia,"Clicks":ca,
-                "imp_holdout_days":ih,"clk_holdout_days":ch,
-                "imp_naive":in_,"clk_naive":cn_}
-    imp_df = grp[[dc,ic]].rename(columns={dc:"ds",ic:"y"})
-    clk_df = grp[[dc,cc]].rename(columns={dc:"ds",cc:"y"})
-    pk = dict(daily_seasonality=n_days>=28, weekly_seasonality=n_days>=14,
-              yearly_seasonality=False, interval_width=0.80,
-              changepoint_prior_scale=0.05 if n_days<60 else 0.15,
-              uncertainty_samples=500)
-    try:
-        mi=Prophet(**pk); mc=Prophet(**pk)
-        mi.fit(imp_df); mc.fit(clk_df)
-        fci=mi.predict(mi.make_future_dataframe(periods=periods))
-        fcc=mc.predict(mc.make_future_dataframe(periods=periods))
-        lh = pd.to_datetime(grp[dc].max())
-        fi = fci[fci["ds"]>lh][["ds","yhat","yhat_lower","yhat_upper"]]
-        fc = fcc[fcc["ds"]>lh][["ds","yhat","yhat_lower","yhat_upper"]]
-        oi = fi.rename(columns={"ds":"Date","yhat":f"{platform}_Impressions",
-                                "yhat_lower":f"{platform}_Impressions_Low",
-                                "yhat_upper":f"{platform}_Impressions_High"})
-        oc = fc.rename(columns={"ds":"Date","yhat":f"{platform}_Clicks",
-                                "yhat_lower":f"{platform}_Clicks_Low",
-                                "yhat_upper":f"{platform}_Clicks_High"})
-        mg = oi.merge(oc,on="Date")
-        mg["Date"] = pd.to_datetime(mg["Date"]).dt.date
-        for c in mg.columns:
-            if c!="Date": mg[c]=mg[c].clip(lower=0).round(0).astype(int)
-        return mg, accuracy, dq
-    except Exception as ex:
-        dq["warnings"].append(f"⛔ {platform}: Prophet error — {ex}")
-        return None,None,dq
-
-# ── Verdict (plain English)
-def _verdict(model_acc, naive_acc):
-    if model_acc is None or naive_acc is None:
-        return "Cannot compare — data too sparse", "orange"
-    gap = round(model_acc - naive_acc, 1)
-    if gap >= 5:
-        return (f"✅ Model is {gap}% more accurate than a simple guess "
-                f"(Model:{model_acc}% vs Guess:{naive_acc}%) — learning real patterns", "green")
-    elif gap > 0:
-        return (f"⚠️ Model is {gap}% better than a simple guess "
-                f"(Model:{model_acc}% vs Guess:{naive_acc}%) — use as guide", "orange")
-    elif gap == 0:
-        return (f"⚠️ Model and simple guess equally accurate ({model_acc}%) — "
-                f"need more days of data for the model to find patterns", "orange")
+def as_filename_token(value):
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        text = str(int(value))
     else:
-        return (f"❌ Simple guess outperforms model by {abs(gap)}% — "
-                f"upload more data (21+ days ideal)", "red")
+        text = str(value).strip()
+        if re.fullmatch(r"\d+\.0", text):
+            text = text[:-2]
+    text = re.sub(r'[\\/:*?"<>|]', "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
-def _confidence(n_days, m_acc, n_acc, fdays):
-    if not n_days or n_days<10:
-        return "🔴 Low Confidence — less than 10 days of data. Extrapolation only.", "low"
-    sz = "high" if n_days>=21 else "medium"
-    sn = f"{n_days} days of history"
-    hn = f"{fdays}d horizon {'✅' if fdays<=14 else '⚠️ beyond recommended 14d'}"
-    if m_acc is None or n_acc is None:
-        return f"🟡 Medium Confidence — {sn}, {hn}. Accuracy unavailable (sparse data).", "medium"
-    gap = m_acc - n_acc
-    if gap>=5 and sz=="high" and fdays<=14:
-        return (f"🟢 High Confidence — Model is {round(gap,1)}% more accurate than a simple guess. "
-                f"{sn}, {hn}. Suitable for client reporting.", "high")
-    elif gap>=5:
-        return (f"🟡 Medium-High Confidence — {round(gap,1)}% better than a simple guess. "
-                f"{sn}, {hn}. Use as directional guide.", "medium")
-    elif gap>=0:
-        return (f"🟡 Medium Confidence — {round(gap,1)}% better than a simple guess. "
-                f"{sn}, {hn}. Internal planning only.", "medium")
+
+def as_filename_date(value):
+    if value is None or value == "":
+        return ""
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        parsed = pd.to_datetime(value, errors="coerce")
     else:
-        return (f"🔴 Low Confidence — simple guess outperforms by {abs(round(gap,1))}%. "
-                f"Upload more data.", "low")
+        text = str(value).strip()
+        if not re.search(r"\d", text):
+            return ""
+        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+        if pd.isna(parsed):
+            parsed = pd.to_datetime(text, errors="coerce", dayfirst=False)
+    if pd.isna(parsed):
+        return as_filename_token(value)
+    return parsed.strftime("%d-%m-%Y")
 
-# ── Shared forecast UI
-def render_forecast_ui(model_label, forecast_fn, model_key, gam_clean, dcm_clean, option):
-    has_gam = gam_clean is not None and "Product" in gam_clean.columns
-    has_dcm = dcm_clean is not None and "Product" in dcm_clean.columns
-    def hd(df): return df is not None and any("date" in c.lower() for c in df.columns)
 
-    if not has_gam and not has_dcm:
-        st.info("Upload at least one file in the **Reporting** tab first."); return
-    if not hd(gam_clean) and not hd(dcm_clean):
-        st.warning("⚠️ No date column found. Forecasting requires a date column."); return
+def apply_excel_totals(ws, header_row, data_start, data_end, sum_columns,
+                       ratio_pairs=None, max_columns=None, sumif_rules=None):
+    last_data = data_end - 1
+    if last_data < data_start:
+        return
+    header_map = {cell.value: cell.column for cell in ws[header_row] if cell.value is not None}
 
-    prods = set()
-    if has_gam: prods.update(gam_clean[gam_clean["Product"]!="Ignore"]["Product"].dropna().unique())
-    if has_dcm: prods.update(dcm_clean[dcm_clean["Product"]!="Ignore"]["Product"].dropna().unique())
-    prods = sorted(prods)
-    if not prods: st.warning("⚠️ No mapped products found."); return
+    def letter(name):
+        return get_column_letter(header_map[name])
 
-    st.markdown('<div class="section-title">Settings</div>', unsafe_allow_html=True)
-    c1,c2,c3 = st.columns([3,1,1])
-    with c1: sel = st.selectbox("Select Product", prods, key=f"p_{model_key}")
-    with c2: fd  = st.selectbox("Forecast Days",[7,14,21,30], key=f"d_{model_key}",
-                                help="7–14 days most reliable")
-    with c3:
-        st.markdown("<br>",unsafe_allow_html=True)
-        run = st.button(f"🚀 Run {model_label}", use_container_width=True, key=f"r_{model_key}")
+    for col_name in sum_columns:
+        if col_name not in header_map:
+            continue
+        col_letter = letter(col_name)
+        ws.cell(row=data_end, column=header_map[col_name]).value = (
+            f"=SUM({col_letter}{data_start}:{col_letter}{last_data})"
+        )
 
-    st.caption("📌 Accuracy = fixed 3-day holdout test. Model trained on all-but-last-3 days, tested on last 3.")
-    st.caption("📌 Simple guess = repeat last known value. Model must beat this to be useful.")
-    if not run: return
+    for col_name in (max_columns or []):
+        if col_name not in header_map:
+            continue
+        col_letter = letter(col_name)
+        ws.cell(row=data_end, column=header_map[col_name]).value = (
+            f"=MAX({col_letter}{data_start}:{col_letter}{last_data})"
+        )
 
-    gf=ga=None; gd=dict(EMPTY_DQ)
-    df_=da=None; dd=dict(EMPTY_DQ)
+    for result_col, num_col, den_col in (ratio_pairs or []):
+        if result_col not in header_map or num_col not in header_map or den_col not in header_map:
+            continue
+        num_letter = letter(num_col)
+        den_letter = letter(den_col)
+        ws.cell(row=data_end, column=header_map[result_col]).value = (
+            f'=IF({den_letter}{data_end}=0,"",{num_letter}{data_end}/{den_letter}{data_end})'
+        )
 
-    with st.spinner(f"Running {model_label}…"):
-        if has_gam and hd(gam_clean):
-            gf,ga,gd = forecast_fn(gam_clean.to_json(), sel, fd, "GAM")
-        if has_dcm and hd(dcm_clean):
-            df_,da,dd = forecast_fn(dcm_clean.to_json(), sel, fd, "DCM")
+    for rule in (sumif_rules or []):
+        result_col = rule["result"]
+        criteria_col = rule["criteria"]
+        sum_col = rule["sum"]
+        if result_col not in header_map or criteria_col not in header_map or sum_col not in header_map:
+            continue
+        criteria = rule["criteria_text"]
+        c_letter = letter(criteria_col)
+        s_letter = letter(sum_col)
+        formula = (
+            f'=SUMIF({c_letter}{data_start}:{c_letter}{last_data},"{criteria}",'
+            f"{s_letter}{data_start}:{s_letter}{last_data})"
+        )
+        if rule.get("divide_by"):
+            den_col = rule["divide_by"]
+            if den_col not in header_map:
+                continue
+            d_letter = letter(den_col)
+            den_formula = (
+                f'SUMIF({c_letter}{data_start}:{c_letter}{last_data},"{criteria}",'
+                f"{d_letter}{data_start}:{d_letter}{last_data})"
+            )
+            formula = f'=IF({den_formula}=0,"",{formula[1:]}/{den_formula})'
+        ws.cell(row=data_end, column=header_map[result_col]).value = formula
 
-    # Data quality
-    st.markdown('<div class="section-title">📋 Data Quality</div>', unsafe_allow_html=True)
-    q1,q2 = st.columns(2)
-    for dq,pl,col in [(gd,"GAM",q1),(dd,"DCM",q2)]:
-        with col:
-            q = dq.get("quality","block")
-            st.metric(f"{pl} — Historical Days", f"{dq.get('n_days',0)} days",
-                      delta=("Sufficient ✅" if q in("good","caution") else
-                             "Caution ⚠️" if q=="warn" else "Insufficient ⛔"),
-                      delta_color="normal" if q=="good" else "off")
-            for w in dq.get("warnings",[]):
-                if w.startswith("⛔"): st.error(w)
-                elif w.startswith("⚠️"): st.warning(w)
-                else: st.info(w)
 
-    if gf is None and df_ is None:
-        st.error("❌ Forecast could not run. See data quality above."); return
+def apply_delivery_formulas(ws, header_row, data_start, data_end):
+    """Delivery % = Delivery Impressions / Contracted Impressions, including the total row."""
+    header_map = {cell.value: cell.column for cell in ws[header_row] if cell.value is not None}
+    needed = ("Delivery", "Delivery Impressions", "Contracted Impressions")
+    if any(name not in header_map for name in needed):
+        return
+    num = get_column_letter(header_map["Delivery Impressions"])
+    den = get_column_letter(header_map["Contracted Impressions"])
+    col = header_map["Delivery"]
+    for r in range(data_start, data_end + 1):
+        ws.cell(row=r, column=col).value = f'=IF({den}{r}=0,"",{num}{r}/{den}{r})'
 
-    final = (gf.merge(df_,on="Date",how="outer") if gf is not None and df_ is not None
-             else gf if gf is not None else df_)
-    final = final.sort_values("Date").reset_index(drop=True)
-    final["Date"] = pd.to_datetime(final["Date"]).dt.date
 
-    st.success(f"✅ {model_label} — {fd} day forecast for **{sel}**")
+def paint_black_columns(ws, header_row, data_start, data_end, column_names):
+    """Black border on every cell in these columns, including blanks. No black fill."""
+    header_map = {cell.value: cell.column for cell in ws[header_row] if cell.value is not None}
+    for col_name in column_names:
+        if col_name not in header_map:
+            continue
+        col = header_map[col_name]
+        header_cell = ws.cell(row=header_row, column=col)
+        header_cell.fill = header_fill
+        header_cell.font = header_font
+        header_cell.border = table_border
+        header_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for r in range(data_start, data_end + 1):
+            cell = ws.cell(row=r, column=col)
+            is_total = r == data_end
+            cell.fill = total_fill if is_total else white_fill
+            cell.font = total_font if is_total else black_font
+            cell.border = table_border
+            cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    # Accuracy
-    st.markdown('<div class="section-title">🎯 Accuracy vs Simple Guess (3-Day Hold-Out Test)</div>',
-                unsafe_allow_html=True)
-    st.caption(
-        "Model trained on all days except last 3. "
-        "Predicted last 3 days. Compared to actual. "
-        "**Simple guess** = repeat yesterday's value. "
-        "< 10 days of data → weekday-mean model (deterministic). "
-        "10+ days → XGBoost single-threaded (same result on local & Cloud)."
+
+# ============================================================
+# 3. MAIN PIPELINE  (sections 3-18 of the Colab script)
+#    Same logic - wrapped in one function so Streamlit can call it.
+# ============================================================
+
+def build_report(file_bytes, currency_choice="1", log=print):
+    """
+    file_bytes      : raw bytes of the uploaded .xlsx / .xlsm
+    currency_choice : "1".."8" (see CURRENCY_FORMATS)
+    log             : callable used instead of print()
+    Returns (output_xlsx_bytes, download_name, df_creative_final)
+    """
+
+    def src():
+        return io.BytesIO(file_bytes)
+
+    currency_format = CURRENCY_FORMATS.get(currency_choice, CURRENCY_FORMATS["1"])
+    log(f"Selected currency: {CURRENCY_NAMES.get(currency_choice, 'USD ($)')}")
+
+    # --------------------------------------------------------
+    # Validate workbook
+    # --------------------------------------------------------
+    try:
+        workbook_source = pd.ExcelFile(src())
+    except Exception as exc:
+        raise ValueError(f"Unable to open the uploaded Excel workbook: {exc}") from exc
+
+    if "Performance Report" not in workbook_source.sheet_names:
+        raise ValueError("The uploaded workbook must contain a sheet named 'Performance Report'.")
+    if "Creative Level" not in workbook_source.sheet_names:
+        raise ValueError("The uploaded workbook must contain a sheet named 'Creative Level'.")
+
+    # --------------------------------------------------------
+    # 3. READ PERFORMANCE REPORT FROM ROW 9
+    # --------------------------------------------------------
+    log("Reading Performance Report data starting from row 9 ...")
+    df_raw = pd.read_excel(src(), sheet_name="Performance Report", header=8)
+
+    df_raw = df_raw.dropna(axis=1, how="all")
+    df_raw = clean_column_names(df_raw)
+
+    require_columns(
+        df_raw,
+        [
+            "Line Item Name", "Proposal ID", "Proposal Name", "Campaign Start",
+            "Campaign End", "Line Item ID", "Contracted Impressions", "Billable Impressions",
+        ],
+        "Performance Report"
     )
 
-    cmp_rows=[]
-    acols = st.columns(4); ci=0
-    for pl,acc in [("GAM",ga),("DCM",da)]:
-        if not acc: continue
-        for mt,hk,nk in [("Impressions","imp_holdout_days","imp_naive"),
-                          ("Clicks","clk_holdout_days","clk_naive")]:
-            val=acc.get(mt); nv=acc.get(nk); hn=acc.get(hk,3)
-            if ci<4:
-                if val is None:
-                    acols[ci].metric(f"{pl} {mt}","N/A",
-                                     delta="Sparse data",delta_color="off")
-                else:
-                    fit = "Good ✅" if val>=80 else ("Fair ⚠️" if val>=60 else "Low ❌")
-                    gap_s=""
-                    if nv is not None:
-                        g=round(val-nv,1)
-                        gap_s=(f" · {g}% better than guess" if g>0
-                               else f" · same as guess" if g==0
-                               else f" · {abs(g)}% worse than guess")
-                    acols[ci].metric(f"{pl} {mt} Accuracy",f"{val}%",
-                                     delta=f"{fit}{gap_s} · {hn}d test",
-                                     delta_color="normal" if val>=80 and (nv is None or val>=nv) else "off")
-                ci+=1
-            vt,vc=_verdict(val,nv)
-            cmp_rows.append({"Platform":pl,"Metric":mt,
-                             "Model Accuracy":f"{val}%" if val is not None else "N/A",
-                             "Simple Guess":f"{nv}%" if nv is not None else "N/A",
-                             "Test Days":hn,"Verdict":vt})
+    df_raw = df_raw[df_raw["Line Item Name"].notna()].copy()
+    df_raw = df_raw[
+        ~df_raw["Line Item Name"].astype(str).str.strip().str.lower().eq("total")
+    ].copy()
 
-    if ci==0: st.info("Accuracy unavailable — data too sparse.")
+    df_raw = df_raw.rename(columns={
+        "Local Impressions": "Delivery Impressions",
+        "Local Clicks": "Clicks",
+    })
+    df_raw = clean_column_names(df_raw)
 
-    if cmp_rows:
-        st.markdown('<div class="section-title">📊 Full Comparison Table</div>',unsafe_allow_html=True)
-        st.dataframe(pd.DataFrame(cmp_rows), use_container_width=True, hide_index=True)
-        imp_r=[r for r in cmp_rows if r["Metric"]=="Impressions"]
-        if imp_r:
-            st.markdown("**Overall Impression Forecast Trustworthiness:**")
-            for r in imp_r:
-                ma=(float(r["Model Accuracy"].replace("%",""))
-                    if r["Model Accuracy"]!="N/A" else None)
-                na=(float(r["Simple Guess"].replace("%",""))
-                    if r["Simple Guess"]!="N/A" else None)
-                vt,vc=_verdict(ma,na)
-                if vc=="green": st.success(f"**{r['Platform']}:** {vt}")
-                elif vc=="orange": st.warning(f"**{r['Platform']}:** {vt}")
-                else: st.error(f"**{r['Platform']}:** {vt}")
+    delivery_pct_candidates = [
+        "% Delivered", "% Delivery", "Delivery %", "Delivered %",
+        "%Delivered", "%Delivery", "Delivery Percent", "Delivered Percent",
+        "Delivery", "Delivered",
+    ]
+    source_delivery_col = first_existing_column(df_raw, delivery_pct_candidates)
 
-    with st.expander("📖 Why the model may not beat a simple guess — and what to do"):
-        st.markdown(f"""
-The model learns **weekday delivery patterns** — e.g. Monday always delivers more than Saturday.
-A simple guess (repeat yesterday) ignores this completely.
-
-**Why the model sometimes still loses:**
-
-| Reason | Fix |
-|---|---|
-| Campaign data < 21 days | Upload more days — single biggest improvement |
-| Very flat / stable delivery | Flat series → any model ≈ naive (that's OK) |
-| Erratic / inconsistent delivery | Normal for short flights — use longer campaigns |
-| Choosing > 14 day forecast | Reduce to 7–14 days |
-
-**Current data:** GAM={gd.get('n_days',0)} days · DCM={dd.get('n_days',0)} days  
-**Current horizon:** {fd} days {"✅" if fd<=14 else "⚠️ beyond recommended"}
-
-**What to tell management if model doesn't beat simple guess:**
-> *"With {min(gd.get('n_days',0),dd.get('n_days',0))} days of data, we can see the delivery trend
-> but the model needs 21+ days to reliably detect weekday patterns.
-> Once the campaign has more history, the forecast will outperform a basic estimate."*
-""")
-
-    # Confidence
-    st.markdown('<div class="section-title">🏷️ Forecast Confidence</div>',unsafe_allow_html=True)
-    cc1,cc2=st.columns(2)
-    for pl,acc,dq_i,col in [("GAM",ga,gd,cc1),("DCM",da,dd,cc2)]:
-        if not acc:
-            with col: st.info(f"**{pl}:** No data."); continue
-        lb,lv=_confidence(dq_i.get("n_days",0),acc.get("Impressions"),acc.get("imp_naive"),fd)
-        with col:
-            st.markdown(f"**{pl} Impressions**")
-            if lv=="high": st.success(lb)
-            elif lv=="medium": st.warning(lb)
-            else: st.error(lb)
-
-    # Summary
-    fut=final.tail(fd)
-    st.markdown('<div class="section-title">Forecast — Next Period</div>',unsafe_allow_html=True)
-    sc=st.columns(4); si=0
-    for pl in ["GAM","DCM"]:
-        for col_n in [f"{pl}_Impressions",f"{pl}_Clicks"]:
-            if col_n in fut.columns and si<4:
-                sc[si].metric(col_n.replace("_"," ")+f" (next {fd}d)",
-                              f"{int(fut[col_n].sum()):,}"); si+=1
-
-    st.markdown('<div class="section-title">Full Forecast Table</div>',unsafe_allow_html=True)
-    st.caption("_Low=pessimistic · _High=optimistic · 80% confidence band.")
-    st.dataframe(final, use_container_width=True)
-
-    # Charts
-    ic_=[c for c in final.columns if "impression" in c.lower()
-         and "low" not in c.lower() and "high" not in c.lower()]
-    if ic_:
-        st.markdown('<div class="section-title">📈 Impression Forecast</div>',unsafe_allow_html=True)
-        st.line_chart(final.set_index("Date")[ic_])
-    cc_=[c for c in final.columns if "click" in c.lower()
-         and "low" not in c.lower() and "high" not in c.lower()]
-    if cc_:
-        st.markdown('<div class="section-title">🖱️ Click Forecast</div>',unsafe_allow_html=True)
-        st.line_chart(final.set_index("Date")[cc_])
-
-    buf=io.BytesIO(); final.to_excel(buf,index=False); buf.seek(0)
-    st.download_button(f"⬇️ Download {model_label} Forecast",data=buf,
-                       file_name=f"{option}_{sel}_{model_key}_{fd}d.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True,key=f"dl_{model_key}")
-
-# ── Mapping manager
-def mapping_ui(platform, _opts):
-    m=st.session_state.mappings
-    st.markdown(f"##### {platform} Mapping")
-    with st.expander(f"➕ Add / Update {platform}"):
-        cid=st.text_input("Campaign ID",key=f"{platform}_id")
-        pk=pkey(platform,cid) if cid else ""
-        if cid and pk in m: st.caption("Existing:"); st.json(m[pk])
-        cl=st.checkbox("Replace existing",key=f"{platform}_cl")
-        bt=st.text_area("keyword = value (one per line)",height=120,
-                        placeholder="Audience = Audience Data",key=f"{platform}_bt")
-        if st.button(f"💾 Save {platform}",use_container_width=True,key=f"{platform}_sv"):
-            if not cid.strip(): st.error("Enter Campaign ID")
-            else:
-                m[pk]={} if cl else m.get(pk,{})
-                a=s=0
-                for ln in bt.split("\n"):
-                    ln=ln.strip()
-                    if not ln: continue
-                    if "=" in ln:
-                        k,v=ln.split("=",1); k,v=k.strip(),v.strip()
-                        if k and v: m[pk][k]=v; a+=1
-                        else: s+=1
-                    else: s+=1
-                save_mappings(m); st.session_state.mappings=m
-                st.success(f"✅ {a} saved")
-                if s: st.warning(f"⚠️ {s} skipped")
-                st.rerun()
-    with st.expander(f"👁️ View {platform}"):
-        pks=[k for k in m if k.startswith(f"{platform}::")]
-        if pks:
-            lbs=[k.split("::",1)[1] for k in pks]
-            cl2=st.selectbox("Campaign",lbs,key=f"{platform}_vs")
-            cpk=pkey(platform,cl2)
-            if cpk in m:
-                st.dataframe(pd.DataFrame(list(m[cpk].items()),
-                             columns=["Keyword","Mapped Value"]),
-                             use_container_width=True,height=180)
-                if st.button(f"⛶ Full View",use_container_width=True,key=f"{platform}_fv"):
-                    st.session_state.show_fullview=True
-                    st.session_state.fullview_platform=platform
-                    st.session_state.fullview_campaign=cl2; st.rerun()
-        else: st.info(f"No {platform} mappings yet.")
-    with st.expander(f"🗑️ Delete {platform}"):
-        pks=[k for k in m if k.startswith(f"{platform}::")]
-        if pks:
-            lbs=[k.split("::",1)[1] for k in pks]
-            dl=st.selectbox("Campaign to delete",lbs,key=f"{platform}_ds")
-            if st.button(f"❌ Delete {dl}",use_container_width=True,key=f"{platform}_db"):
-                del m[pkey(platform,dl)]; save_mappings(m)
-                st.session_state.mappings=m; st.success("Deleted ✅"); st.rerun()
-        else: st.info(f"No {platform} campaigns to delete.")
-
-# ── Sidebar
-with st.sidebar:
-    if st.button("🔄 Refresh Mappings",use_container_width=True):
-        st.session_state.mappings=load_mappings(); st.toast("Refreshed ✅"); st.rerun()
-    st.divider(); st.header("⚙️ Configuration")
-    option=st.selectbox("Campaign / Report",all_options)
-    st.divider(); st.subheader("📅 Date Filter")
-    apply_date=st.checkbox("Enable Date Filter")
-    date_range=None
-    if apply_date:
-        c1,c2=st.columns(2)
-        with c1: sd=st.date_input("Start",key="date_start")
-        with c2: ed=st.date_input("End",key="date_end")
-        if sd and ed:
-            if sd<=ed: date_range=(str(sd),str(ed))
-            else: st.warning("⚠️ Start must be ≤ End date.")
-    st.divider(); st.subheader("🧮 CPM Calculator")
-    bgt=st.number_input("Budget ($)",min_value=0.0,step=100.0)
-    imp=st.number_input("Impressions",min_value=0.0,step=1000.0)
-    cpm=st.number_input("CPM ($)",min_value=0.0,step=0.1)
-    if bgt>0 and imp>0: st.success(f"CPM = ${round((bgt/imp)*1000,2)}")
-    elif imp>0 and cpm>0: st.success(f"Budget = ${round((imp*cpm)/1000,2)}")
-    elif bgt>0 and cpm>0: st.success(f"Impressions = {round((bgt*1000)/cpm):,}")
-    st.divider(); st.subheader("🗂️ Mappings")
-    mapping_ui("GAM",all_options); st.markdown("")
-    mapping_ui("DCM",all_options)
-
-# ── Full view panel
-if st.session_state.show_fullview:
-    fp=st.session_state.fullview_platform; fc_=st.session_state.fullview_campaign
-    fpk=pkey(fp,fc_); mp=st.session_state.mappings
-    h1,h2=st.columns([7,1])
-    with h1: st.subheader(f"⛶ Full Mapping — {fp} / {fc_}")
-    with h2:
-        if st.button("✖ Close",use_container_width=True):
-            st.session_state.show_fullview=False; st.rerun()
-    if fpk in mp:
-        fdf=pd.DataFrame(list(mp[fpk].items()),columns=["Keyword","Mapped Value"])
-        srch=st.text_input("🔎 Filter…",key="fv_s")
-        if srch:
-            fdf=fdf[fdf["Keyword"].str.contains(srch,case=False,na=False)|
-                    fdf["Mapped Value"].str.contains(srch,case=False,na=False)]
-        st.dataframe(fdf,use_container_width=True,height=500)
-        st.caption(f"{len(fdf)} of {len(mp[fpk])} shown")
-        st.download_button("⬇️ Download CSV",data=fdf.to_csv(index=False).encode(),
-                           file_name=f"{fc_}_{fp}_mapping.csv",mime="text/csv")
-    else: st.warning("No mapping data found.")
-    st.divider()
-
-# ── Main tabs
-t1,t2,t3,t4,t5=st.tabs(["📊 Reporting","🔍 Column Explorer","💡 Insights",
-                          "🔮 Forecast","⚖️ GAM vs DCM"])
-
-with t1:
-    st.markdown(f'<div class="section-title">Upload Files — {option}</div>',unsafe_allow_html=True)
-    u1,u2=st.columns(2)
-    with u1: gam_file=st.file_uploader("📂 GAM",type=["csv","xlsx"],key="gu")
-    with u2: dcm_file=st.file_uploader("📂 DCM",type=["csv","xlsx"],key="du")
-    gam_df=read_file(gam_file,"gam"); dcm_df=read_file(dcm_file,"dcm")
-    if gam_df is not None:
-        with st.expander("GAM Preview"): st.dataframe(gam_df.head(20),use_container_width=True)
-    if dcm_df is not None:
-        with st.expander("DCM Preview"): st.dataframe(dcm_df.head(20),use_container_width=True)
-    gr,gc_=None,None; dr,dc_=None,None
-    if gam_df is not None: gr,gc_=process_data(gam_df,"GAM",option,date_range)
-    if dcm_df is not None: dr,dc_=process_data(dcm_df,"DCM",option,date_range)
-    st.markdown('<div class="section-title">Select Metrics</div>',unsafe_allow_html=True)
-    p1,p2=st.columns(2)
-    with p1: gam_pivot=build_pivot(gc_,"GAM") if gc_ is not None else None
-    with p2: dcm_pivot=build_pivot(dc_,"DCM") if dc_ is not None else None
-    st.markdown('<div class="section-title">Results</div>',unsafe_allow_html=True)
-    def disp(piv,pl):
-        if piv is None: st.info(f"No {pl} data yet."); return
-        st.markdown(f'<span class="chip">{pl}</span>',unsafe_allow_html=True)
-        st.dataframe(piv,use_container_width=True)
-        gc=piv.columns[0]
-        cd=piv[~piv[gc].astype(str).str.contains("total",case=False,na=False)]
-        ic,cc,ct=f"{pl}_Impressions",f"{pl}_Clicks",f"{pl}_CTR (%)"
-        r1,r2,r3=st.columns(3)
-        if ic in cd.columns:
-            with r1: st.caption("Impressions"); st.bar_chart(cd.set_index(gc)[ic])
-        if cc in cd.columns:
-            with r2: st.caption("Clicks"); st.bar_chart(cd.set_index(gc)[cc])
-        if ct in cd.columns:
-            with r3: st.caption("CTR (%)"); st.bar_chart(cd.set_index(gc)[ct])
-    r1c,r2c=st.columns(2)
-    with r1c: disp(gam_pivot,"GAM")
-    with r2c: disp(dcm_pivot,"DCM")
-    def trd(ndf,pl):
-        if ndf is None: return
-        dc=next((c for c in ndf.columns if "date" in c.lower()),None)
-        ic=next((c for c in ndf.columns if "impression" in c.lower()),None)
-        if not dc or not ic: return
-        ndf=ndf.copy(); ndf[dc]=pd.to_datetime(ndf[dc],errors="coerce")
-        tr=ndf.groupby(dc)[ic].sum().reset_index().sort_values(dc)
-        tr=tr.rename(columns={ic:f"{pl} Impressions"})
-        if len(tr)>1: st.caption(f"{pl} Impression Trend"); st.line_chart(tr.set_index(dc))
-    st.markdown('<div class="section-title">Trend Over Time</div>',unsafe_allow_html=True)
-    t1c,t2c=st.columns(2)
-    with t1c: trd(gc_,"GAM")
-    with t2c: trd(dc_,"DCM")
-    st.markdown('<div class="section-title">Download</div>',unsafe_allow_html=True)
-    fn=st.text_input("File name",value=f"{option}_report")
-    d1,d2=st.columns(2)
-    for pv,lb,col in [(gam_pivot,"GAM",d1),(dcm_pivot,"DCM",d2)]:
-        with col:
-            if pv is not None:
-                buf=io.BytesIO(); pv.to_excel(buf,index=False); buf.seek(0)
-                st.download_button(f"⬇️ {lb} Excel",data=buf,
-                                   file_name=f"{fn}_{lb}.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   use_container_width=True)
-
-with t2:
-    st.markdown('<div class="section-title">Column Explorer</div>',unsafe_allow_html=True)
-    def expl(df,lb,ck):
-        st.markdown(f'<span class="chip">{lb}</span>',unsafe_allow_html=True)
-        if df is None: st.info(f"Upload {lb} in Reporting tab."); return
-        sel=st.selectbox("Column",df.columns,key=ck)
-        if sel:
-            v=df[sel].dropna().astype(str).unique()
-            st.metric("Unique",len(v))
-            st.dataframe(pd.DataFrame(v,columns=[sel]).head(500),use_container_width=True)
-    e1,e2=st.columns(2)
-    with e1: expl(gam_df,"GAM","eg")
-    with e2: expl(dcm_df,"DCM","ed")
-
-with t3:
-    st.markdown('<div class="section-title">Performance Insights</div>',unsafe_allow_html=True)
-    def ins(piv,pl,col):
-        with col:
-            st.markdown(f'<span class="chip">{pl}</span>',unsafe_allow_html=True)
-            il=generate_insights(piv,pl)
-            if il:
-                for i in il:
-                    if any(i.startswith(e) for e in ["🚀","🌟","💡","👍"]): st.success(i)
-                    elif any(i.startswith(e) for e in ["⚠️","📉"]): st.warning(i)
-                    else: st.info(i)
-            else: st.info(f"Upload {pl} data in Reporting tab.")
-    i1,i2=st.columns(2)
-    ins(gam_pivot,"GAM",i1); ins(dcm_pivot,"DCM",i2)
-
-with t4:
-    st.markdown('<div class="section-title">🔮 Forecast</div>',unsafe_allow_html=True)
-    s1,s2=st.columns(2)
-    with s1:
-        if XGB_OK: st.success("✅ XGBoost — ready (5+ days, fast)")
-        else: st.error(f"❌ XGBoost — {XGB_ERROR}")
-    with s2:
-        if PROPHET_OK: st.success("✅ Prophet — ready (7+ days, weekly patterns)")
-        else: st.warning(f"⚠️ Prophet — {PROPHET_ERROR}")
-
-    with st.expander("📖 Which model & how accuracy works"):
-        st.markdown("""
-| | XGBoost ⚡ | Prophet 📈 |
-|---|---|---|
-| Min data | 5 days | 7 days |
-| Best for | Short campaigns | Long campaigns (28+ days) |
-| Key strength | Weekday patterns via rolling features | Full weekly decomposition |
-
-**How accuracy is measured:**
-Train on all data except last 3 days → predict last 3 days → compare to actual.
-"Simple guess" = repeat yesterday's value. If model can't beat this, you need more data.
-
-**What makes XGBoost beat naive:**
-The model learns that Monday always delivers ~15% more than average, Saturday ~40% less.
-A simple guess ignores this. With 14+ days of data, these patterns become clear and the model wins.
-""")
-
-    sx,sp=st.tabs(["⚡ XGBoost","📈 Prophet"])
-    with sx:
-        if not XGB_OK:
-            st.error(f"⚠️ {XGB_ERROR}")
-            st.code("pip install xgboost","bash")
-        else:
-            render_forecast_ui("XGBoost",forecast_xgb,"xgb",gc_,dc_,option)
-    with sp:
-        if not PROPHET_OK:
-            st.error(f"⚠️ {PROPHET_ERROR}")
-            st.markdown("**Mac:** `brew install gcc && pip install prophet`  \n"
-                        "**Windows:** `conda install -c conda-forge prophet`  \n"
-                        "**Linux:** `sudo apt-get install -y gcc g++ && pip install prophet`")
-        else:
-            render_forecast_ui("Prophet",forecast_prophet,"prophet",gc_,dc_,option)
-
-with t5:
-    st.markdown('<div class="section-title">GAM vs DCM Reconciliation</div>',unsafe_allow_html=True)
-    fd_=None
-    if gam_pivot is not None and dcm_pivot is not None:
-        fd_=pd.merge(gam_pivot,dcm_pivot,on="Product",how="outer").fillna(0)
-        gi,di="GAM_Impressions","DCM_Impressions"
-        if gi in fd_.columns and di in fd_.columns:
-            fd_["Discrepancy (%)"]=(
-                (fd_[di]-fd_[gi])/fd_[gi].replace(0,1)*100).round(0)
-            fd_["Flag"]=fd_["Discrepancy (%)"].apply(
-                lambda x:"⚠️ High" if x > 2 or x < 0 else "✅ OK")
-            m1,m2,m3,m4=st.columns(4)
-            m1.metric("GAM Impressions",f"{int(fd_[gi].sum()):,}")
-            m2.metric("DCM Impressions",f"{int(fd_[di].sum()):,}")
-            m3.metric("Avg Discrepancy",f"{round(fd_['Discrepancy (%)'].mean(),2)}%")
-            m4.metric("⚠️ High Flags",int((fd_["Flag"]=="⚠️ High").sum()))
-        st.dataframe(fd_,use_container_width=True)
-        if gi in fd_.columns and di in fd_.columns:
-            st.markdown('<div class="section-title">Impression Comparison</div>',unsafe_allow_html=True)
-            cr=fd_[~fd_["Product"].astype(str).str.contains("total",case=False,na=False)]
-            st.bar_chart(cr.set_index("Product")[[gi,di]])
-        buf=io.BytesIO(); fd_.to_excel(buf,index=False); buf.seek(0)
-        st.download_button("⬇️ Download Reconciliation",data=buf,
-                           file_name=f"{option}_reconciliation.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           use_container_width=True)
-    elif gam_pivot is not None:
-        st.info("DCM not uploaded."); st.dataframe(gam_pivot,use_container_width=True)
-    elif dcm_pivot is not None:
-        st.info("GAM not uploaded."); st.dataframe(dcm_pivot,use_container_width=True)
+    if source_delivery_col:
+        log(f"Found user Delivery column: '{source_delivery_col}'")
+        df_raw["_User_Delivery_Pct"] = clean_percentage_series(df_raw[source_delivery_col])
     else:
-        st.info("Upload both files in the Reporting tab.")
+        log("No user '% Delivered' style column found - Delivery will be blank")
+        df_raw["_User_Delivery_Pct"] = np.nan
+
+    optional_performance_columns = [
+        "Delivery Impressions", "Clicks", "Third Party Impressions", "Third Party Clicks",
+        "CTR Benchmark", "Video Starts", "Video Start Rate", "Video 25", "Video 50",
+        "Video 75", "Video Completions", "Video Completion Rate", "Campaign Type",
+        "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
+        "Contracted Rate", "Total Active View Viewable Impressions",
+        "Total Active View % Viewable Impressions",
+    ]
+    for col in optional_performance_columns:
+        if col not in df_raw.columns:
+            df_raw[col] = np.nan
+
+    for col in ["Third Party Impressions", "Third Party Clicks"]:
+        values = pd.to_numeric(df_raw[col], errors="coerce").fillna(0)
+        if values.eq(0).all():
+            df_raw.drop(columns=col, inplace=True)
+
+    # --------------------------------------------------------
+    # 4. VCPM DETECTION
+    # --------------------------------------------------------
+    line_item_lower = df_raw["Line Item Name"].fillna("").astype(str).str.strip().str.lower()
+    vcpm_mask = line_item_lower.str.contains("vcpm", regex=False, na=False)
+    has_vcpm = bool(vcpm_mask.any())
+    log(f"VCPM detected: {'YES' if has_vcpm else 'NO'}")
+
+    # --------------------------------------------------------
+    # 5. SPLIT MAIN / SPECIAL
+    # --------------------------------------------------------
+    special_mask = line_item_lower.str.match(r"^\(\d+\)", na=False)
+    df_main_raw = df_raw[~special_mask].copy()
+    df_special_raw = df_raw[special_mask].copy()
+
+    # --------------------------------------------------------
+    # 6. COLUMN DEFINITIONS
+    # --------------------------------------------------------
+    main_columns = [
+        "Proposal ID", "Proposal Name", "Campaign Start", "Campaign End",
+        "Line Item ID", "Line Item Name", "Contracted Impressions",
+        "Delivery Impressions", "Billable Impressions", "Clicks", "CTR",
+        "CTR Benchmark", "Delivery", "Video Starts", "Video Start Rate",
+        "Video 25", "Video 50", "Video 75", "Video Completions",
+        "Video Completion Rate",
+    ]
+    if has_vcpm:
+        main_columns.extend([
+            "Total Active View Viewable Impressions",
+            "Total Active View % Viewable Impressions",
+        ])
+    main_columns.extend([
+        "Contracted Rate", "Campaign Type", "Net Cost",
+        "Campaign Budget Delivered", "Campaign Budget Remaining", "Campaign Length",
+    ])
+
+    special_columns = [
+        "Proposal ID", "Proposal Name", "Campaign Start", "Campaign End",
+        "Line Item ID", "Line Item Name", "Contracted Impressions",
+        "Delivery Impressions", "Billable Impressions", "Delivery",
+        "Contracted Rate", "Campaign Type", "Net Cost",
+        "Campaign Budget Delivered", "Campaign Budget Remaining", "Campaign Length",
+    ]
+
+    # --------------------------------------------------------
+    # 7. PREPARE MAIN DATA
+    # --------------------------------------------------------
+    def prepare_main(df):
+        df = format_date_columns(df.copy())
+
+        for col in ["Contracted Impressions", "Delivery Impressions", "Clicks"]:
+            if col in df.columns:
+                df[col] = clean_and_convert_numeric(df[col])
+
+        other_numeric = [
+            "Billable Impressions", "CTR Benchmark", "Video Starts", "Video 25",
+            "Video 50", "Video 75", "Video Completions", "Contracted Rate",
+            "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
+        ]
+        if has_vcpm:
+            other_numeric.extend([
+                "Total Active View Viewable Impressions",
+                "Total Active View % Viewable Impressions",
+            ])
+        df = convert_numeric_columns(df, other_numeric)
+
+        df["CTR"] = safe_ratio(df["Clicks"], df["Delivery Impressions"])
+        df["Delivery"] = df["_User_Delivery_Pct"] if "_User_Delivery_Pct" in df.columns else np.nan
+        df["Video Start Rate"] = safe_ratio(df["Video Starts"], df["Delivery Impressions"])
+        df["Video Completion Rate"] = safe_ratio(df["Video Completions"], df["Video Starts"])
+
+        start = pd.to_datetime(df["Campaign Start"], errors="coerce")
+        end = pd.to_datetime(df["Campaign End"], errors="coerce")
+        df["Campaign Length"] = (end - start).dt.days + 1
+
+        if has_vcpm:
+            current_line_items = df["Line Item Name"].fillna("").astype(str).str.strip().str.lower()
+            current_vcpm_mask = current_line_items.str.contains("vcpm", regex=False, na=False)
+            df.loc[~current_vcpm_mask, "Total Active View Viewable Impressions"] = np.nan
+            df.loc[~current_vcpm_mask, "Total Active View % Viewable Impressions"] = np.nan
+
+        campaign_type_lower = df["Campaign Type"].fillna("").astype(str).str.strip().str.lower()
+        cpd_mask = campaign_type_lower.eq("cpd")
+        cpd_length = pd.to_numeric(df.loc[cpd_mask, "Campaign Length"], errors="coerce")
+        cpd_cost = pd.to_numeric(df.loc[cpd_mask, "Net Cost"], errors="coerce")
+        df.loc[cpd_mask, "Contracted Rate"] = np.where(
+            cpd_length.notna() & cpd_length.ne(0), cpd_cost / cpd_length, np.nan
+        )
+
+        for col in main_columns:
+            if col not in df.columns:
+                df[col] = np.nan
+        return df[main_columns].copy()
+
+    # --------------------------------------------------------
+    # 8. PREPARE SPECIAL DATA
+    # --------------------------------------------------------
+    def prepare_special(df):
+        if df.empty:
+            return pd.DataFrame(columns=special_columns)
+
+        df = format_date_columns(df.copy())
+        for col in ["Contracted Impressions", "Delivery Impressions"]:
+            if col in df.columns:
+                df[col] = clean_and_convert_numeric(df[col])
+
+        numeric_columns = [
+            "Billable Impressions", "Contracted Rate", "Net Cost",
+            "Campaign Budget Delivered", "Campaign Budget Remaining",
+        ]
+        df = convert_numeric_columns(df, numeric_columns)
+
+        df["Delivery"] = df["_User_Delivery_Pct"] if "_User_Delivery_Pct" in df.columns else np.nan
+
+        start = pd.to_datetime(df["Campaign Start"], errors="coerce")
+        end = pd.to_datetime(df["Campaign End"], errors="coerce")
+        df["Campaign Length"] = (end - start).dt.days + 1
+
+        campaign_type_lower = df["Campaign Type"].fillna("").astype(str).str.strip().str.lower()
+        cpd_mask = campaign_type_lower.eq("cpd")
+        cpd_length = pd.to_numeric(df.loc[cpd_mask, "Campaign Length"], errors="coerce")
+        cpd_cost = pd.to_numeric(df.loc[cpd_mask, "Net Cost"], errors="coerce")
+        df.loc[cpd_mask, "Contracted Rate"] = np.where(
+            cpd_length.notna() & cpd_length.ne(0), cpd_cost / cpd_length, np.nan
+        )
+
+        for col in special_columns:
+            if col not in df.columns:
+                df[col] = np.nan
+        return df[special_columns].copy()
+
+    df_main = prepare_main(df_main_raw)
+    df_special = prepare_special(df_special_raw)
+
+    # --------------------------------------------------------
+    # 9. CREATE MAIN TOTAL ROW
+    # --------------------------------------------------------
+    def create_main_total(df):
+        total = {col: np.nan for col in main_columns}
+        total["Line Item Name"] = "Total"
+
+        sum_columns = [
+            "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
+            "Clicks", "Video Starts", "Video 25", "Video 50", "Video 75",
+            "Video Completions", "Net Cost", "Campaign Budget Delivered",
+            "Campaign Budget Remaining",
+        ]
+        for col in sum_columns:
+            total[col] = pd.to_numeric(df[col], errors="coerce").sum()
+
+        total["CTR"] = safe_ratio(total["Clicks"], total["Delivery Impressions"])
+        total["Delivery"] = np.nan
+        total["Video Start Rate"] = safe_ratio(total["Video Starts"], total["Delivery Impressions"])
+        total["Video Completion Rate"] = safe_ratio(total["Video Completions"], total["Video Starts"])
+
+        if has_vcpm:
+            line_items = df["Line Item Name"].fillna("").astype(str).str.strip().str.lower()
+            vcpm_rows = df[line_items.str.contains("vcpm", regex=False, na=False)]
+            vcpm_viewable = pd.to_numeric(vcpm_rows["Total Active View Viewable Impressions"], errors="coerce").sum()
+            vcpm_delivery = pd.to_numeric(vcpm_rows["Delivery Impressions"], errors="coerce").sum()
+            total["Total Active View Viewable Impressions"] = vcpm_viewable
+            total["Total Active View % Viewable Impressions"] = safe_ratio(vcpm_viewable, vcpm_delivery)
+
+        total["Campaign Length"] = pd.to_numeric(df["Campaign Length"], errors="coerce").max()
+        return pd.DataFrame([total], columns=main_columns)
+
+    # --------------------------------------------------------
+    # 10. CREATE SPECIAL TOTAL ROW
+    # --------------------------------------------------------
+    def create_special_total(df):
+        total = {col: np.nan for col in special_columns}
+        total["Line Item Name"] = "Total"
+        sum_columns = [
+            "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
+            "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
+        ]
+        for col in sum_columns:
+            total[col] = pd.to_numeric(df[col], errors="coerce").sum()
+        total["Delivery"] = np.nan
+        total["Campaign Length"] = pd.to_numeric(df["Campaign Length"], errors="coerce").max()
+        return pd.DataFrame([total], columns=special_columns)
+
+    df_main_final = pd.concat([df_main, create_main_total(df_main)], ignore_index=True)
+
+    if not df_special.empty:
+        df_special_final = pd.concat([df_special, create_special_total(df_special)], ignore_index=True)
+        has_special = True
+    else:
+        df_special_final = pd.DataFrame(columns=special_columns)
+        has_special = False
+
+    log(f"Special section included: {'YES' if has_special else 'NO'}")
+
+    # --------------------------------------------------------
+    # 11. READ CREATIVE LEVEL FROM ROW 9
+    # --------------------------------------------------------
+    log("Reading Creative Level data starting from row 9 ...")
+    df_creative_original = pd.read_excel(src(), sheet_name="Creative Level", header=8)
+
+    df_creative = df_creative_original.copy()
+    df_creative = df_creative.dropna(how="all").copy()
+    df_creative = clean_column_names(df_creative)
+
+    creative_rename_map = {
+        "Local Impressions": "Delivered Impressions",
+        "Local Clicks": "Clicks",
+        "Video Completion Rate": "Video Completions Rate",
+    }
+    df_creative = df_creative.rename(columns=creative_rename_map)
+
+    creative_columns = [
+        "Report Start", "Line Item Name", "Creative Name",
+        "Delivered Impressions", "Third Party Impressions", "Clicks",
+        "Third Party Clicks", "CTR", "Video Starts", "Video 25",
+        "Video 50", "Video 75", "Video Completions",
+        "Video Completions Rate", "Campaign Budget Delivered",
+    ]
+    for col in creative_columns:
+        if col not in df_creative.columns:
+            df_creative[col] = np.nan
+
+    df_creative["Creative Name"] = (
+        df_creative["Creative Name"].astype("string")
+        .str.replace(r"\s*\(copy\)", "", case=False, regex=True)
+        .str.strip()
+    )
+
+    report_start_lookup = df_raw[["Line Item Name", "Campaign Start"]].copy()
+    report_start_lookup["Campaign Start"] = pd.to_datetime(report_start_lookup["Campaign Start"], errors="coerce")
+    report_start_lookup = (
+        report_start_lookup.dropna(subset=["Line Item Name"])
+        .groupby("Line Item Name", as_index=False)["Campaign Start"].min()
+        .rename(columns={"Campaign Start": "Report Start"})
+    )
+    report_start_lookup["Report Start"] = pd.to_datetime(
+        report_start_lookup["Report Start"], errors="coerce"
+    ).dt.date
+
+    df_creative = df_creative.drop(columns=["Report Start"], errors="ignore").merge(
+        report_start_lookup, on="Line Item Name", how="left"
+    )
+
+    if "Campaign Budget Delivered" not in df_creative.columns:
+        df_creative["Campaign Budget Delivered"] = np.nan
+    df_creative["Campaign Budget Delivered"] = pd.to_numeric(
+        df_creative["Campaign Budget Delivered"], errors="coerce"
+    )
+
+    creative_numeric_columns = [
+        "Delivered Impressions", "Third Party Impressions", "Clicks",
+        "Third Party Clicks", "Video Starts", "Video 25", "Video 50",
+        "Video 75", "Video Completions", "Campaign Budget Delivered",
+    ]
+    for col in creative_numeric_columns:
+        if col in df_creative.columns:
+            cleaned = (
+                df_creative[col].astype("string").str.strip()
+                .str.replace(",", "", regex=False)
+                .str.replace(r"[$€£₹¥]", "", regex=True)
+                .str.replace(r"^[CA]\$", "", regex=True)
+                .str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+            )
+            df_creative[col] = pd.to_numeric(cleaned, errors="coerce").fillna(0)
+
+    df_creative["Line Item Name"] = df_creative["Line Item Name"].astype("string").str.strip()
+    df_creative["Creative Name"] = df_creative["Creative Name"].astype("string").str.strip()
+    df_creative["Report Start"] = pd.to_datetime(df_creative["Report Start"], errors="coerce").dt.date
+
+    df_creative["CTR"] = safe_ratio_zero(df_creative["Clicks"], df_creative["Delivered Impressions"])
+    df_creative["Video Completions Rate"] = safe_ratio_zero(
+        df_creative["Video Completions"], df_creative["Video Starts"]
+    )
+
+    creative_name_text = df_creative["Creative Name"].astype("string").str.strip()
+    invalid_creative_names = {"", "nan", "none", "null", "<na>", "na", "n/a"}
+    valid_mask = creative_name_text.notna() & ~creative_name_text.str.lower().isin(invalid_creative_names)
+    df_creative = df_creative.loc[valid_mask].copy()
+
+    group_columns = ["Report Start", "Line Item Name", "Creative Name"]
+    sum_metric_columns = [
+        "Delivered Impressions", "Third Party Impressions", "Clicks",
+        "Third Party Clicks", "Video Starts", "Video 25", "Video 50",
+        "Video 75", "Video Completions", "Campaign Budget Delivered",
+    ]
+
+    df_creative = (
+        df_creative.groupby(group_columns, as_index=False, dropna=False, sort=False)[sum_metric_columns]
+        .sum()
+    )
+    df_creative["CTR"] = safe_ratio_zero(df_creative["Clicks"], df_creative["Delivered Impressions"])
+    df_creative["Video Completions Rate"] = safe_ratio_zero(
+        df_creative["Video Completions"], df_creative["Video Starts"]
+    )
+    df_creative = df_creative[creative_columns].copy()
+
+    def create_creative_total(df):
+        total = {col: 0 for col in creative_columns}
+        total["Report Start"] = ""
+        total["Line Item Name"] = ""
+        total["Creative Name"] = "Total"
+        for col in sum_metric_columns:
+            total[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).sum()
+        total["CTR"] = safe_ratio_zero(total["Clicks"], total["Delivered Impressions"])
+        total["Video Completions Rate"] = safe_ratio_zero(total["Video Completions"], total["Video Starts"])
+        return pd.DataFrame([total], columns=creative_columns)
+
+    df_creative_final = pd.concat([df_creative, create_creative_total(df_creative)], ignore_index=True)
+    df_creative_final = missing_values_to_zero(df_creative_final)
+
+    total_row_mask = df_creative_final["Creative Name"].astype(str).str.strip().str.lower().eq("total")
+    df_creative_final.loc[total_row_mask, ["Report Start", "Line Item Name"]] = ""
+    df_creative_final.loc[total_row_mask, "CTR"] = safe_ratio_zero(
+        df_creative_final.loc[total_row_mask, "Clicks"],
+        df_creative_final.loc[total_row_mask, "Delivered Impressions"]
+    )
+    df_creative_final.loc[total_row_mask, "Video Completions Rate"] = safe_ratio_zero(
+        df_creative_final.loc[total_row_mask, "Video Completions"],
+        df_creative_final.loc[total_row_mask, "Video Starts"]
+    )
+    df_creative_final = df_creative_final[creative_columns].copy()
+
+    assert list(df_creative_final.columns) == creative_columns
+    log("Creative Level breakdown aggregation completed.")
+
+    # --------------------------------------------------------
+    # 12. DEVICE & COUNTRY (5 blank rows)
+    # --------------------------------------------------------
+    df_device = pd.DataFrame({
+        "Device": [""] * 5,
+        "Impressions": [0] * 5,
+        "Clicks": [0] * 5,
+        "CTR": [0] * 5,
+    })
+
+    df_country = pd.DataFrame({
+        "Country": [""] * 5,
+        "Impressions": [0] * 5,
+        "Clicks": [0] * 5,
+        "CTR": [0] * 5,
+    })
+
+    # --------------------------------------------------------
+    # 13. BUILD WORKBOOK - COPY HEADER (rows 1-8) EXACTLY AS UPLOADED
+    # --------------------------------------------------------
+    src_wb = load_workbook(src())
+    src_ws = src_wb["Performance Report"]
+
+    src_wb_values = load_workbook(src(), data_only=True)
+    src_ws_values = src_wb_values["Performance Report"]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Performance Report"
+    ws.sheet_view.showGridLines = False
+
+    HEADER_ROWS = 8
+
+    for row in src_ws.iter_rows(min_row=1, max_row=HEADER_ROWS, max_col=src_ws.max_column):
+        for cell in row:
+            calc_value = src_ws_values.cell(row=cell.row, column=cell.column).value
+            raw_value = cell.value
+
+            if calc_value is not None:
+                value = calc_value
+            elif isinstance(raw_value, str) and raw_value.startswith("="):
+                value = None
+            else:
+                value = raw_value
+
+            new_cell = ws.cell(row=cell.row, column=cell.column, value=to_excel_safe(value))
+            copy_cell_style(cell, new_cell)
+
+    for merged_range in src_ws.merged_cells.ranges:
+        if merged_range.min_row <= HEADER_ROWS:
+            ws.merge_cells(str(merged_range))
+
+    for col_letter, dim in src_ws.column_dimensions.items():
+        if dim.width:
+            ws.column_dimensions[col_letter].width = dim.width
+
+    for r in range(1, HEADER_ROWS + 1):
+        if src_ws.row_dimensions[r].height:
+            ws.row_dimensions[r].height = src_ws.row_dimensions[r].height
+
+    tmp_dir = tempfile.gettempdir()
+    for img in src_ws._images:
+        try:
+            img_path = os.path.join(tmp_dir, f"header_img_{id(img)}.png")
+            with open(img_path, "wb") as f:
+                f.write(img._data())
+            new_img = XLImage(img_path)
+            new_img.anchor = img.anchor
+            ws.add_image(new_img)
+        except Exception as e:
+            log(f"Could not copy one image: {e}")
+
+    def fill_blank_header_value(label_text, fallback_value):
+        if fallback_value in (None, ""):
+            return
+        for r in range(1, HEADER_ROWS + 1):
+            for c in range(1, ws.max_column + 1):
+                v = ws.cell(row=r, column=c).value
+                if isinstance(v, str) and v.strip().lower().startswith(label_text.lower()):
+                    has_value_to_right = any(
+                        ws.cell(row=r, column=cc).value not in (None, "")
+                        for cc in range(c + 1, ws.max_column + 1)
+                    )
+                    if not has_value_to_right:
+                        ws.cell(row=r, column=c + 1, value=fallback_value)
+                    return
+
+    proposal_names = df_main_final["Proposal Name"].dropna().astype(str).str.strip()
+    proposal_names = proposal_names[proposal_names.ne("") & proposal_names.ne("Total")]
+    proposal_ids = df_main_final["Proposal ID"].dropna().astype(str).str.strip()
+    proposal_ids = proposal_ids[proposal_ids.ne("") & proposal_ids.ne("Total")]
+
+    fallback_proposal_name = proposal_names.iloc[0] if not proposal_names.empty else None
+    fallback_proposal_id = proposal_ids.iloc[0] if not proposal_ids.empty else None
+
+    fill_blank_header_value("Report Proposal Name", fallback_proposal_name)
+    fill_blank_header_value("Report Proposal ID", fallback_proposal_id)
+
+    campaign_ends = pd.to_datetime(df_main["Campaign End"], errors="coerce").dropna()
+    fallback_end = campaign_ends.max() if not campaign_ends.empty else None
+    fill_blank_header_value("Report End Date", fallback_end.date() if fallback_end is not None else None)
+
+    report_proposal_name = header_label_value(ws, "Report Proposal Name") or fallback_proposal_name
+    report_proposal_id = header_label_value(ws, "Report Proposal ID") or fallback_proposal_id
+    report_end_date = (
+        header_label_value(ws, "Report End Date")
+        or header_label_value(ws, "Report End")
+        or (fallback_end.date() if fallback_end is not None else None)
+    )
+
+    name_part = as_filename_token(report_proposal_name) or "Report"
+    id_part = as_filename_token(report_proposal_id) or "ID"
+    end_part = as_filename_date(report_end_date) or "EndDate"
+    download_name = f"{name_part}_{id_part}_{end_part}.xlsx"
+
+    start_row = HEADER_ROWS + 1
+
+    write_dataframe(ws, df_main_final, start_row=start_row)
+    main_header_row = start_row
+    main_data_start = start_row + 1
+    main_data_end = start_row + len(df_main_final)
+
+    main_sum_columns = [
+        "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
+        "Clicks", "Video Starts", "Video 25", "Video 50", "Video 75",
+        "Video Completions", "Net Cost", "Campaign Budget Delivered",
+        "Campaign Budget Remaining",
+    ]
+    main_ratio_pairs = [
+        ("CTR", "Clicks", "Delivery Impressions"),
+        ("Video Start Rate", "Video Starts", "Delivery Impressions"),
+        ("Video Completion Rate", "Video Completions", "Video Starts"),
+    ]
+    main_sumif_rules = []
+    if has_vcpm:
+        main_sumif_rules = [
+            {
+                "result": "Total Active View Viewable Impressions",
+                "criteria": "Line Item Name",
+                "criteria_text": "*vcpm*",
+                "sum": "Total Active View Viewable Impressions",
+            },
+            {
+                "result": "Total Active View % Viewable Impressions",
+                "criteria": "Line Item Name",
+                "criteria_text": "*vcpm*",
+                "sum": "Total Active View Viewable Impressions",
+                "divide_by": "Delivery Impressions",
+            },
+        ]
+
+    apply_excel_totals(
+        ws,
+        header_row=main_header_row,
+        data_start=main_data_start,
+        data_end=main_data_end,
+        sum_columns=main_sum_columns,
+        ratio_pairs=main_ratio_pairs,
+        max_columns=["Campaign Length"],
+        sumif_rules=main_sumif_rules,
+    )
+
+    if has_special:
+        special_start = main_data_end + 4
+        write_dataframe(ws, df_special_final, start_row=special_start)
+        special_header_row = special_start
+        special_data_start = special_start + 1
+        special_data_end = special_start + len(df_special_final)
+        apply_excel_totals(
+            ws,
+            header_row=special_header_row,
+            data_start=special_data_start,
+            data_end=special_data_end,
+            sum_columns=[
+                "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
+                "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
+            ],
+            max_columns=["Campaign Length"],
+        )
+
+    ws_cl = wb.create_sheet("Creative Level")
+    write_dataframe(ws_cl, df_creative_original.dropna(how="all"), start_row=1)
+
+    ws_bd = wb.create_sheet("Creative Level breakdown")
+    write_dataframe(ws_bd, df_creative_final, start_row=1)
+    if len(df_creative_final) >= 1:
+        apply_excel_totals(
+            ws_bd,
+            header_row=1,
+            data_start=2,
+            data_end=1 + len(df_creative_final),
+            sum_columns=sum_metric_columns,
+            ratio_pairs=[
+                ("CTR", "Clicks", "Delivered Impressions"),
+                ("Video Completions Rate", "Video Completions", "Video Starts"),
+            ],
+        )
+
+    ws_dev = wb.create_sheet("Device")
+    write_dataframe(ws_dev, df_device, start_row=1)
+
+    ws_cty = wb.create_sheet("Country")
+    write_dataframe(ws_cty, df_country, start_row=1)
+
+    src_wb.close()
+    src_wb_values.close()
+
+    # --------------------------------------------------------
+    # 14. STYLING
+    # --------------------------------------------------------
+    def format_table(ws, header_row, data_start, data_end,
+                     percentage_columns=None, integer_columns=None,
+                     currency_columns=None, date_columns=None,
+                     center_columns=None, force_total_fill_columns=None,
+                     wide_columns=None, has_total_row=False):
+
+        percentage_columns = percentage_columns or []
+        integer_columns = integer_columns or []
+        currency_columns = currency_columns or []
+        date_columns = date_columns or []
+        center_columns = center_columns or []
+        force_total_fill_columns = force_total_fill_columns or []
+        wide_columns = wide_columns or {}
+
+        for col_num in range(1, ws.max_column + 1):
+            cell = ws.cell(row=header_row, column=col_num)
+            if cell.value is not None:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = table_border
+
+        normal_end = data_end - 1 if has_total_row else data_end
+        for row_num in range(data_start, normal_end + 1):
+            for col_num in range(1, ws.max_column + 1):
+                cell = ws.cell(row=row_num, column=col_num)
+                if cell.value is not None:
+                    cell.fill = white_fill
+                    cell.font = black_font
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
+                    cell.border = table_border
+
+        if has_total_row:
+            header_map_temp = {cell.value: cell.column for cell in ws[header_row] if cell.value is not None}
+            no_total_box = {
+                "Proposal ID", "Proposal Name", "Campaign Start", "Campaign End", "Line Item ID",
+            }
+            empty_border = Border()
+            empty_fill = PatternFill(fill_type=None)
+            for col_name, col_num in header_map_temp.items():
+                cell = ws.cell(row=data_end, column=col_num)
+                if col_name in no_total_box:
+                    cell.value = None
+                    cell.fill = empty_fill
+                    cell.border = empty_border
+                    cell.font = black_font
+                    continue
+                cell.fill = total_fill
+                cell.font = total_font
+                cell.border = table_border
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        header_map = {cell.value: cell.column for cell in ws[header_row] if cell.value is not None}
+
+        for col_name in integer_columns:
+            if col_name in header_map:
+                col = header_map[col_name]
+                for r in range(data_start, data_end + 1):
+                    ws.cell(row=r, column=col).number_format = "#,##0"
+
+        for col_name in percentage_columns:
+            if col_name in header_map:
+                col = header_map[col_name]
+                for r in range(data_start, data_end + 1):
+                    ws.cell(row=r, column=col).number_format = "0.00%"
+
+        for col_name in currency_columns:
+            if col_name in header_map:
+                col = header_map[col_name]
+                for r in range(data_start, data_end + 1):
+                    ws.cell(row=r, column=col).number_format = currency_format
+
+        for col_name in date_columns:
+            if col_name in header_map:
+                col = header_map[col_name]
+                for r in range(data_start, data_end + 1):
+                    ws.cell(row=r, column=col).number_format = "m/d/yyyy"
+
+        for col_name in center_columns:
+            if col_name in header_map:
+                col = header_map[col_name]
+                for r in range(data_start, data_end + 1):
+                    ws.cell(row=r, column=col).alignment = Alignment(horizontal="center", vertical="center")
+
+        for col_num in range(1, ws.max_column + 1):
+            letter = get_column_letter(col_num)
+            max_len = 0
+            for r in range(header_row, data_end + 1):
+                val = ws.cell(row=r, column=col_num).value
+                if val is not None:
+                    max_len = max(max_len, len(str(val)))
+            ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 45)
+
+        for col_name, width in wide_columns.items():
+            if col_name in header_map:
+                ws.column_dimensions[get_column_letter(header_map[col_name])].width = width
+
+        ws.row_dimensions[header_row].height = 30
+
+    main_percentage = ["CTR", "CTR Benchmark", "Delivery", "Video Start Rate", "Video Completion Rate"]
+    main_integer = [
+        "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
+        "Clicks", "Video Starts", "Video 25", "Video 50", "Video 75",
+        "Video Completions", "Campaign Length",
+    ]
+    main_center = main_integer + main_percentage + [
+        "Contracted Rate", "Campaign Type", "Net Cost",
+        "Campaign Budget Delivered", "Campaign Budget Remaining",
+    ]
+    if has_vcpm:
+        main_percentage.append("Total Active View % Viewable Impressions")
+        main_integer.append("Total Active View Viewable Impressions")
+        main_center.extend([
+            "Total Active View Viewable Impressions",
+            "Total Active View % Viewable Impressions",
+        ])
+
+    format_table(
+        ws=ws,
+        header_row=main_header_row,
+        data_start=main_data_start,
+        data_end=main_data_end,
+        percentage_columns=main_percentage,
+        integer_columns=main_integer,
+        currency_columns=["Contracted Rate", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining"],
+        date_columns=["Campaign Start", "Campaign End"],
+        center_columns=main_center,
+        force_total_fill_columns=["CTR Benchmark", "Contracted Rate", "Campaign Type", "Video Completion Rate"],
+        wide_columns={"Proposal Name": 45, "Line Item Name": 55},
+        has_total_row=True,
+    )
+
+    if has_vcpm:
+        paint_black_columns(
+            ws,
+            header_row=main_header_row,
+            data_start=main_data_start,
+            data_end=main_data_end,
+            column_names=[
+                "Total Active View Viewable Impressions",
+                "Total Active View % Viewable Impressions",
+            ],
+        )
+
+    header_map = {cell.value: cell.column for cell in ws[main_header_row] if cell.value is not None}
+    for col_name in ["CTR Benchmark", "Video Completion Rate"]:
+        if col_name in header_map:
+            col = header_map[col_name]
+            for r in range(main_data_start, main_data_end + 1):
+                ws.cell(row=r, column=col).border = table_border
+
+    for col_name in ["Delivery", "CTR"]:
+        if col_name in header_map:
+            col = header_map[col_name]
+            for r in range(main_data_start, main_data_end + 1):
+                ws.cell(row=r, column=col).number_format = "0.00%"
+
+    if has_special:
+        format_table(
+            ws=ws,
+            header_row=special_header_row,
+            data_start=special_data_start,
+            data_end=special_data_end,
+            percentage_columns=["Delivery"],
+            integer_columns=["Contracted Impressions", "Delivery Impressions", "Billable Impressions", "Campaign Length"],
+            currency_columns=["Contracted Rate", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining"],
+            date_columns=["Campaign Start", "Campaign End"],
+            center_columns=[
+                "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
+                "Delivery", "Contracted Rate", "Campaign Type", "Net Cost",
+                "Campaign Budget Delivered", "Campaign Budget Remaining", "Campaign Length",
+            ],
+            force_total_fill_columns=["Contracted Rate", "Campaign Type"],
+            wide_columns={"Proposal Name": 45, "Line Item Name": 55},
+            has_total_row=True,
+        )
+        special_header_map = {cell.value: cell.column for cell in ws[special_header_row] if cell.value is not None}
+        if "Delivery" in special_header_map:
+            col = special_header_map["Delivery"]
+            for r in range(special_data_start, special_data_end + 1):
+                ws.cell(row=r, column=col).number_format = "0.00%"
+
+    # --------------------------------------------------------
+    # 15. FORMAT CREATIVE LEVEL (simple)
+    # --------------------------------------------------------
+    ws_cl.sheet_view.showGridLines = False
+    for col in range(1, ws_cl.max_column + 1):
+        cell = ws_cl.cell(row=1, column=col)
+        if cell.value is not None:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = table_border
+
+    for r in range(2, ws_cl.max_row + 1):
+        for c in range(1, ws_cl.max_column + 1):
+            cell = ws_cl.cell(row=r, column=c)
+            if cell.value is not None:
+                cell.fill = white_fill
+                cell.font = black_font
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+                cell.border = table_border
+
+    for c in range(1, ws_cl.max_column + 1):
+        letter = get_column_letter(c)
+        max_len = 0
+        for r in range(1, ws_cl.max_row + 1):
+            val = ws_cl.cell(row=r, column=c).value
+            if val is not None:
+                max_len = max(max_len, len(str(val)))
+        ws_cl.column_dimensions[letter].width = min(max(max_len + 2, 12), 45)
+    ws_cl.row_dimensions[1].height = 30
+
+    # --------------------------------------------------------
+    # 16. FORMAT CREATIVE LEVEL BREAKDOWN
+    # --------------------------------------------------------
+    ws_bd.sheet_view.showGridLines = False
+    breakdown_header_map = {cell.value: cell.column for cell in ws_bd[1] if cell.value is not None}
+
+    for col in range(1, ws_bd.max_column + 1):
+        cell = ws_bd.cell(row=1, column=col)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = table_border
+
+    for r in range(2, ws_bd.max_row + 1):
+        is_total = str(ws_bd.cell(row=r, column=3).value).strip().lower() == "total"
+        for c in range(1, ws_bd.max_column + 1):
+            cell = ws_bd.cell(row=r, column=c)
+            cell.border = table_border
+            cell.fill = total_fill if is_total else white_fill
+            cell.font = total_font if is_total else black_font
+            cell.alignment = Alignment(horizontal="left", vertical="center")
+            if is_total and c in [breakdown_header_map.get("Report Start"), breakdown_header_map.get("Line Item Name")]:
+                cell.value = ""
+
+    for col_name in ["CTR", "Video Completions Rate"]:
+        if col_name in breakdown_header_map:
+            col = breakdown_header_map[col_name]
+            for r in range(2, ws_bd.max_row + 1):
+                ws_bd.cell(row=r, column=col).number_format = "0.00%"
+
+    for col_name in [
+        "Delivered Impressions", "Third Party Impressions", "Clicks",
+        "Third Party Clicks", "Video Starts", "Video 25", "Video 50",
+        "Video 75", "Video Completions",
+    ]:
+        if col_name in breakdown_header_map:
+            col = breakdown_header_map[col_name]
+            for r in range(2, ws_bd.max_row + 1):
+                ws_bd.cell(row=r, column=col).number_format = "#,##0"
+
+    if "Campaign Budget Delivered" in breakdown_header_map:
+        col = breakdown_header_map["Campaign Budget Delivered"]
+        for r in range(2, ws_bd.max_row + 1):
+            ws_bd.cell(row=r, column=col).number_format = currency_format
+
+    if "Report Start" in breakdown_header_map:
+        col = breakdown_header_map["Report Start"]
+        for r in range(2, ws_bd.max_row + 1):
+            cell = ws_bd.cell(row=r, column=col)
+            if cell.value not in (None, ""):
+                cell.number_format = "m/d/yyyy"
+
+    for col_name in [
+        "Delivered Impressions", "Third Party Impressions", "Clicks", "Third Party Clicks",
+        "Video Starts", "Video 25", "Video 50", "Video 75", "Video Completions",
+        "CTR", "Video Completions Rate", "Campaign Budget Delivered",
+    ]:
+        if col_name in breakdown_header_map:
+            col = breakdown_header_map[col_name]
+            for r in range(2, ws_bd.max_row + 1):
+                ws_bd.cell(row=r, column=col).alignment = Alignment(horizontal="center", vertical="center")
+
+    for c in range(1, ws_bd.max_column + 1):
+        letter = get_column_letter(c)
+        max_len = 0
+        for r in range(1, ws_bd.max_row + 1):
+            val = ws_bd.cell(row=r, column=c).value
+            if val is not None:
+                max_len = max(max_len, len(str(val)))
+        ws_bd.column_dimensions[letter].width = min(max(max_len + 2, 12), 45)
+
+    for col_name in ["Line Item Name", "Creative Name"]:
+        if col_name in breakdown_header_map:
+            ws_bd.column_dimensions[get_column_letter(breakdown_header_map[col_name])].width = 45
+    ws_bd.row_dimensions[1].height = 30
+
+    # --------------------------------------------------------
+    # 17. FORMAT DEVICE & COUNTRY
+    # --------------------------------------------------------
+    for sheet in [ws_dev, ws_cty]:
+        sheet.sheet_view.showGridLines = False
+        for c in range(1, 5):
+            cell = sheet.cell(row=1, column=c)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = table_border
+
+        for r in range(2, 7):
+            for c in range(1, 5):
+                cell = sheet.cell(row=r, column=c)
+                cell.border = table_border
+                cell.fill = white_fill
+                cell.font = black_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        for r in range(2, 7):
+            sheet.cell(row=r, column=2).number_format = "#,##0"
+            sheet.cell(row=r, column=3).number_format = "#,##0"
+            ctr_cell = sheet.cell(row=r, column=4)
+            ctr_cell.value = f'=IF(B{r}=0,0,C{r}/B{r})'
+            ctr_cell.number_format = "0.00%"
+
+        sheet.column_dimensions["A"].width = 18
+        sheet.column_dimensions["B"].width = 15
+        sheet.column_dimensions["C"].width = 12
+        sheet.column_dimensions["D"].width = 12
+        sheet.row_dimensions[1].height = 30
+
+    # --------------------------------------------------------
+    # 18. SAVE (to memory instead of /content) & VERIFY
+    # --------------------------------------------------------
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    output_bytes = buffer.getvalue()
+
+    check_wb = load_workbook(io.BytesIO(output_bytes), read_only=True)
+    expected = ["Performance Report", "Creative Level", "Creative Level breakdown", "Device", "Country"]
+    missing = [s for s in expected if s not in check_wb.sheetnames]
+    check_wb.close()
+    if missing:
+        raise RuntimeError("Missing sheets: " + ", ".join(missing))
+
+    log("FINAL REPORT CREATED SUCCESSFULLY")
+    log("Header block (rows 1-8 + logo) copied from source file")
+    log("Report Proposal Name / ID filled only if source is blank")
+    log("Delivery column = user-uploaded values only")
+    log(f"Download name: {download_name}")
+
+    return output_bytes, download_name, df_creative_final
+
+
+# ============================================================
+# 4. STREAMLIT UI
+# ============================================================
+
+st.set_page_config(page_title="Performance Report Builder", page_icon="📊", layout="wide")
+
+st.title("📊 Performance Report + Creative Level Breakdown")
+st.caption(
+    "Upload the source Excel (needs sheets **Performance Report** and **Creative Level**, "
+    "data starting from row 9) and get the final formatted report."
+)
+
+with st.sidebar:
+    st.header("Settings")
+    currency_choice = st.selectbox(
+        "Currency",
+        options=list(CURRENCY_NAMES.keys()),
+        format_func=lambda k: CURRENCY_NAMES[k],
+        index=0,
+    )
+
+uploaded_file = st.file_uploader("Upload source Excel file", type=["xlsx", "xlsm"])
+
+if uploaded_file is not None:
+    if st.button("Generate Report", type="primary"):
+        logs = []
+        try:
+            with st.spinner("Building report..."):
+                out_bytes, out_name, df_preview = build_report(
+                    uploaded_file.getvalue(), currency_choice, log=logs.append
+                )
+            st.session_state["result"] = {
+                "bytes": out_bytes,
+                "name": out_name,
+                "preview": df_preview,
+                "logs": logs,
+            }
+        except ValueError as e:
+            st.session_state.pop("result", None)
+            st.error(str(e))
+        except Exception as e:
+            st.session_state.pop("result", None)
+            st.error(f"Something went wrong: {e}")
+            st.exception(e)
+else:
+    st.session_state.pop("result", None)
+
+result = st.session_state.get("result")
+if result:
+    st.success("Report created successfully.")
+    st.download_button(
+        label=f"⬇️ Download {result['name']}",
+        data=result["bytes"],
+        file_name=result["name"],
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    with st.expander("Processing log"):
+        for line in result["logs"]:
+            st.write(line)
+    with st.expander("Preview: Creative Level breakdown", expanded=False):
+        st.dataframe(result["preview"], use_container_width=True)
