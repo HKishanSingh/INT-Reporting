@@ -422,9 +422,9 @@ def build_report(file_bytes, currency_choice="1", log=print):
     main_columns = [
         "Proposal ID", "Proposal Name", "Campaign Start", "Campaign End",
         "Line Item ID", "Line Item Name", "Contracted Impressions",
-        "Delivery Impressions", "Billable Impressions", "Clicks",
-        "Third Party Impressions", "Third Party Clicks",
-        "CTR", "CTR Benchmark", "Delivery", "Video Starts", "Video Start Rate",
+        "Delivery Impressions", "Third Party Impressions", "Billable Impressions",
+        "Clicks", "Third Party Clicks", "CTR",
+        "CTR Benchmark", "Delivery", "Video Starts", "Video Start Rate",
         "Video 25", "Video 50", "Video 75", "Video Completions", "Video Completion Rate",
     ]
     if has_vcpm:
@@ -440,8 +440,8 @@ def build_report(file_bytes, currency_choice="1", log=print):
     special_columns = [
         "Proposal ID", "Proposal Name", "Campaign Start", "Campaign End",
         "Line Item ID", "Line Item Name", "Contracted Impressions",
-        "Delivery Impressions", "Billable Impressions",
-        "Third Party Impressions", "Third Party Clicks",
+        "Delivery Impressions", "Third Party Impressions", "Billable Impressions",
+        "Clicks", "Third Party Clicks", "CTR",
         "Delivery",
         "Contracted Rate", "Campaign Type", "Net Cost",
         "Campaign Budget Delivered", "Campaign Budget Remaining", "Campaign Length",
@@ -492,7 +492,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
         if df.empty:
             return pd.DataFrame(columns=special_columns)
         df = format_date_columns(df.copy())
-        for col in ["Contracted Impressions", "Delivery Impressions",
+        for col in ["Contracted Impressions", "Delivery Impressions", "Clicks",
                     "Third Party Impressions", "Third Party Clicks"]:
             if col in df.columns:
                 df[col] = clean_and_convert_numeric(df[col])
@@ -500,6 +500,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             "Billable Impressions", "Contracted Rate", "Net Cost",
             "Campaign Budget Delivered", "Campaign Budget Remaining",
         ])
+        df["CTR"] = safe_ratio(df["Clicks"], df["Delivery Impressions"])
         df["Delivery"] = df["_User_Delivery_Pct"] if "_User_Delivery_Pct" in df.columns else np.nan
         start = pd.to_datetime(df["Campaign Start"], errors="coerce")
         end = pd.to_datetime(df["Campaign End"], errors="coerce")
@@ -548,10 +549,11 @@ def build_report(file_bytes, currency_choice="1", log=print):
         total["Line Item Name"] = "Total"
         for col in [
             "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
-            "Third Party Impressions", "Third Party Clicks",
+            "Clicks", "Third Party Impressions", "Third Party Clicks",
             "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
         ]:
             total[col] = pd.to_numeric(df[col], errors="coerce").sum()
+        total["CTR"] = safe_ratio(total["Clicks"], total["Delivery Impressions"])
         total["Delivery"] = np.nan
         total["Campaign Length"] = pd.to_numeric(df["Campaign Length"], errors="coerce").max()
         return pd.DataFrame([total], columns=special_columns)
@@ -796,8 +798,11 @@ def build_report(file_bytes, currency_choice="1", log=print):
             ws, header_row=special_header_row, data_start=special_data_start, data_end=special_data_end,
             sum_columns=[
                 "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
-                "Third Party Impressions", "Third Party Clicks",
+                "Clicks", "Third Party Impressions", "Third Party Clicks",
                 "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
+            ],
+            ratio_pairs=[
+                ("CTR", "Clicks", "Delivery Impressions"),
             ],
             max_columns=["Campaign Length"],
         )
@@ -944,25 +949,26 @@ def build_report(file_bytes, currency_choice="1", log=print):
     if has_special:
         format_table(
             ws=ws, header_row=special_header_row, data_start=special_data_start, data_end=special_data_end,
-            percentage_columns=["Delivery"],
+            percentage_columns=["Delivery", "CTR"],
             integer_columns=[
                 "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
-                "Third Party Impressions", "Third Party Clicks", "Campaign Length",
+                "Clicks", "Third Party Impressions", "Third Party Clicks", "Campaign Length",
             ],
             currency_columns=["Contracted Rate", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining"],
             date_columns=["Campaign Start", "Campaign End"],
             center_columns=[
                 "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
-                "Third Party Impressions", "Third Party Clicks", "Delivery",
+                "Clicks", "Third Party Impressions", "Third Party Clicks", "CTR", "Delivery",
                 "Contracted Rate", "Campaign Type", "Net Cost", "Campaign Budget Delivered",
                 "Campaign Budget Remaining", "Campaign Length",
             ],
             wide_columns={"Proposal Name": 45, "Line Item Name": 55}, has_total_row=True,
         )
         special_header_map = {cell.value: cell.column for cell in ws[special_header_row] if cell.value is not None}
-        if "Delivery" in special_header_map:
-            for r in range(special_data_start, special_data_end + 1):
-                ws.cell(row=r, column=special_header_map["Delivery"]).number_format = "0.00%"
+        for col_name in ["Delivery", "CTR"]:
+            if col_name in special_header_map:
+                for r in range(special_data_start, special_data_end + 1):
+                    ws.cell(row=r, column=special_header_map[col_name]).number_format = "0.00%"
 
     # Creative Level (raw) formatting + row height 25
     ws_cl.sheet_view.showGridLines = False
