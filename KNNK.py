@@ -45,8 +45,8 @@ CURRENCY_NAMES = {
     "8": "None (plain)",
 }
 
-header_fill = PatternFill(fill_type="solid", fgColor="D9D9D9")
-total_fill = PatternFill(fill_type="solid", fgColor="D9D9D9")
+header_fill = PatternFill(fill_type="solid", fgColor="BFBFBF")
+total_fill = PatternFill(fill_type="solid", fgColor="BFBFBF")
 white_fill = PatternFill(fill_type="solid", fgColor="FFFFFF")
 black_font = Font(name="Calibri", color="000000")
 header_font = Font(name="Calibri", bold=True, color="000000")
@@ -404,10 +404,12 @@ def build_report(file_bytes, currency_choice="1", log=print):
         if col not in df_raw.columns:
             df_raw[col] = np.nan
 
+    # Keep Third Party columns always (do not drop even if all zeros)
     for col in ["Third Party Impressions", "Third Party Clicks"]:
-        values = pd.to_numeric(df_raw[col], errors="coerce").fillna(0)
-        if values.eq(0).all():
-            df_raw.drop(columns=col, inplace=True)
+        if col not in df_raw.columns:
+            df_raw[col] = np.nan
+        else:
+            df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
 
     line_item_lower = df_raw["Line Item Name"].fillna("").astype(str).str.strip().str.lower()
     has_vcpm = bool(line_item_lower.str.contains("vcpm", regex=False, na=False).any())
@@ -420,8 +422,9 @@ def build_report(file_bytes, currency_choice="1", log=print):
     main_columns = [
         "Proposal ID", "Proposal Name", "Campaign Start", "Campaign End",
         "Line Item ID", "Line Item Name", "Contracted Impressions",
-        "Delivery Impressions", "Billable Impressions", "Clicks", "CTR",
-        "CTR Benchmark", "Delivery", "Video Starts", "Video Start Rate",
+        "Delivery Impressions", "Billable Impressions", "Clicks",
+        "Third Party Impressions", "Third Party Clicks",
+        "CTR", "CTR Benchmark", "Delivery", "Video Starts", "Video Start Rate",
         "Video 25", "Video 50", "Video 75", "Video Completions", "Video Completion Rate",
     ]
     if has_vcpm:
@@ -437,14 +440,17 @@ def build_report(file_bytes, currency_choice="1", log=print):
     special_columns = [
         "Proposal ID", "Proposal Name", "Campaign Start", "Campaign End",
         "Line Item ID", "Line Item Name", "Contracted Impressions",
-        "Delivery Impressions", "Billable Impressions", "Delivery",
+        "Delivery Impressions", "Billable Impressions",
+        "Third Party Impressions", "Third Party Clicks",
+        "Delivery",
         "Contracted Rate", "Campaign Type", "Net Cost",
         "Campaign Budget Delivered", "Campaign Budget Remaining", "Campaign Length",
     ]
 
     def prepare_main(df):
         df = format_date_columns(df.copy())
-        for col in ["Contracted Impressions", "Delivery Impressions", "Clicks"]:
+        for col in ["Contracted Impressions", "Delivery Impressions", "Clicks",
+                    "Third Party Impressions", "Third Party Clicks"]:
             if col in df.columns:
                 df[col] = clean_and_convert_numeric(df[col])
         other_numeric = [
@@ -486,7 +492,8 @@ def build_report(file_bytes, currency_choice="1", log=print):
         if df.empty:
             return pd.DataFrame(columns=special_columns)
         df = format_date_columns(df.copy())
-        for col in ["Contracted Impressions", "Delivery Impressions"]:
+        for col in ["Contracted Impressions", "Delivery Impressions",
+                    "Third Party Impressions", "Third Party Clicks"]:
             if col in df.columns:
                 df[col] = clean_and_convert_numeric(df[col])
         df = convert_numeric_columns(df, [
@@ -517,7 +524,8 @@ def build_report(file_bytes, currency_choice="1", log=print):
         total["Line Item Name"] = "Total"
         for col in [
             "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
-            "Clicks", "Video Starts", "Video 25", "Video 50", "Video 75",
+            "Clicks", "Third Party Impressions", "Third Party Clicks",
+            "Video Starts", "Video 25", "Video 50", "Video 75",
             "Video Completions", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
         ]:
             total[col] = pd.to_numeric(df[col], errors="coerce").sum()
@@ -540,6 +548,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
         total["Line Item Name"] = "Total"
         for col in [
             "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
+            "Third Party Impressions", "Third Party Clicks",
             "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
         ]:
             total[col] = pd.to_numeric(df[col], errors="coerce").sum()
@@ -765,7 +774,8 @@ def build_report(file_bytes, currency_choice="1", log=print):
         ws, header_row=main_header_row, data_start=main_data_start, data_end=main_data_end,
         sum_columns=[
             "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
-            "Clicks", "Video Starts", "Video 25", "Video 50", "Video 75",
+            "Clicks", "Third Party Impressions", "Third Party Clicks",
+            "Video Starts", "Video 25", "Video 50", "Video 75",
             "Video Completions", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
         ],
         ratio_pairs=[
@@ -786,6 +796,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             ws, header_row=special_header_row, data_start=special_data_start, data_end=special_data_end,
             sum_columns=[
                 "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
+                "Third Party Impressions", "Third Party Clicks",
                 "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
             ],
             max_columns=["Campaign Length"],
@@ -838,6 +849,8 @@ def build_report(file_bytes, currency_choice="1", log=print):
                     cell.font = black_font
                     cell.alignment = Alignment(horizontal="left", vertical="center")
                     cell.border = table_border
+            # Set data row height to 25
+            ws.row_dimensions[row_num].height = 25
         if has_total_row:
             header_map_temp = {cell.value: cell.column for cell in ws[header_row] if cell.value is not None}
             no_total_box = {"Proposal ID", "Proposal Name", "Campaign Start", "Campaign End", "Line Item ID"}
@@ -855,6 +868,8 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 cell.font = total_font
                 cell.border = table_border
                 cell.alignment = Alignment(horizontal="center", vertical="center")
+            # Set total row height to 25 as well
+            ws.row_dimensions[data_end].height = 25
         header_map = {cell.value: cell.column for cell in ws[header_row] if cell.value is not None}
         for col_name in integer_columns:
             if col_name in header_map:
@@ -892,7 +907,8 @@ def build_report(file_bytes, currency_choice="1", log=print):
     main_percentage = ["CTR", "CTR Benchmark", "Delivery", "Video Start Rate", "Video Completion Rate"]
     main_integer = [
         "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
-        "Clicks", "Video Starts", "Video 25", "Video 50", "Video 75", "Video Completions", "Campaign Length",
+        "Clicks", "Third Party Impressions", "Third Party Clicks",
+        "Video Starts", "Video 25", "Video 50", "Video 75", "Video Completions", "Campaign Length",
     ]
     main_center = main_integer + main_percentage + [
         "Contracted Rate", "Campaign Type", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
@@ -929,11 +945,15 @@ def build_report(file_bytes, currency_choice="1", log=print):
         format_table(
             ws=ws, header_row=special_header_row, data_start=special_data_start, data_end=special_data_end,
             percentage_columns=["Delivery"],
-            integer_columns=["Contracted Impressions", "Delivery Impressions", "Billable Impressions", "Campaign Length"],
+            integer_columns=[
+                "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
+                "Third Party Impressions", "Third Party Clicks", "Campaign Length",
+            ],
             currency_columns=["Contracted Rate", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining"],
             date_columns=["Campaign Start", "Campaign End"],
             center_columns=[
-                "Contracted Impressions", "Delivery Impressions", "Billable Impressions", "Delivery",
+                "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
+                "Third Party Impressions", "Third Party Clicks", "Delivery",
                 "Contracted Rate", "Campaign Type", "Net Cost", "Campaign Budget Delivered",
                 "Campaign Budget Remaining", "Campaign Length",
             ],
@@ -944,6 +964,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             for r in range(special_data_start, special_data_end + 1):
                 ws.cell(row=r, column=special_header_map["Delivery"]).number_format = "0.00%"
 
+    # Creative Level (raw) formatting + row height 25
     ws_cl.sheet_view.showGridLines = False
     for col in range(1, ws_cl.max_column + 1):
         cell = ws_cl.cell(row=1, column=col)
@@ -960,6 +981,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 cell.font = black_font
                 cell.alignment = Alignment(horizontal="left", vertical="center")
                 cell.border = table_border
+        ws_cl.row_dimensions[r].height = 25
     for c in range(1, ws_cl.max_column + 1):
         letter = get_column_letter(c)
         max_len = 0
@@ -970,6 +992,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
         ws_cl.column_dimensions[letter].width = min(max(max_len + 2, 12), 45)
     ws_cl.row_dimensions[1].height = 30
 
+    # Creative Level breakdown formatting + row height 25
     ws_bd.sheet_view.showGridLines = False
     breakdown_header_map = {cell.value: cell.column for cell in ws_bd[1] if cell.value is not None}
     for col in range(1, ws_bd.max_column + 1):
@@ -988,6 +1011,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             cell.alignment = Alignment(horizontal="left", vertical="center")
             if is_total and c in [breakdown_header_map.get("Report Start"), breakdown_header_map.get("Line Item Name")]:
                 cell.value = ""
+        ws_bd.row_dimensions[r].height = 25
     for col_name in ["CTR", "Video Completions Rate"]:
         if col_name in breakdown_header_map:
             for r in range(2, ws_bd.max_row + 1):
@@ -1028,6 +1052,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             ws_bd.column_dimensions[get_column_letter(breakdown_header_map[col_name])].width = 45
     ws_bd.row_dimensions[1].height = 30
 
+    # Device & Country sheets – row height 25
     for sheet in [ws_dev, ws_cty]:
         sheet.sheet_view.showGridLines = False
         for c in range(1, 5):
@@ -1048,6 +1073,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             ctr_cell = sheet.cell(row=r, column=4)
             ctr_cell.value = f"=IF(B{r}=0,0,C{r}/B{r})"
             ctr_cell.number_format = "0.00%"
+            sheet.row_dimensions[r].height = 25
         sheet.column_dimensions["A"].width = 18
         sheet.column_dimensions["B"].width = 15
         sheet.column_dimensions["C"].width = 12
@@ -1187,5 +1213,5 @@ with right:
             label="DOWNLOAD REPORT",
             data=result["bytes"],
             file_name=result["name"],
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            mime="application/vnd.openxmlformats.spreadsheetml.sheet",
         )
