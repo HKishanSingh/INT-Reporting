@@ -993,7 +993,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 cell.font = black_font
                 cell.alignment = Alignment(horizontal="left", vertical="center")
                 cell.border = table_border
-        ws_cl.row_dimensions[r].height = 25
+        ws_cl.row_dimensions[r].height = 15
     for c in range(1, ws_cl.max_column + 1):
         letter = get_column_letter(c)
         max_len = 0
@@ -1004,7 +1004,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
         ws_cl.column_dimensions[letter].width = min(max(max_len + 2, 12), 45)
     ws_cl.row_dimensions[1].height = 30
 
-    # Creative Level breakdown formatting + row height 25
+    # Creative Level breakdown formatting + row height 15
     ws_bd.sheet_view.showGridLines = False
     breakdown_header_map = {cell.value: cell.column for cell in ws_bd[1] if cell.value is not None}
     for col in range(1, ws_bd.max_column + 1):
@@ -1023,7 +1023,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             cell.alignment = Alignment(horizontal="left", vertical="center")
             if is_total and c in [breakdown_header_map.get("Report Start"), breakdown_header_map.get("Line Item Name")]:
                 cell.value = ""
-        ws_bd.row_dimensions[r].height = 25
+        ws_bd.row_dimensions[r].height = 15
     for col_name in ["CTR", "Video Completions Rate"]:
         if col_name in breakdown_header_map:
             for r in range(2, ws_bd.max_row + 1):
@@ -1064,7 +1064,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             ws_bd.column_dimensions[get_column_letter(breakdown_header_map[col_name])].width = 45
     ws_bd.row_dimensions[1].height = 30
 
-    # Device & Country sheets – row height 25
+    # Device & Country sheets – row height 15
     for sheet in [ws_dev, ws_cty]:
         sheet.sheet_view.showGridLines = False
         for c in range(1, 5):
@@ -1085,7 +1085,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             ctr_cell = sheet.cell(row=r, column=4)
             ctr_cell.value = f"=IF(B{r}=0,0,C{r}/B{r})"
             ctr_cell.number_format = "0.00%"
-            sheet.row_dimensions[r].height = 25
+            sheet.row_dimensions[r].height = 15
         sheet.column_dimensions["A"].width = 18
         sheet.column_dimensions["B"].width = 15
         sheet.column_dimensions["C"].width = 12
