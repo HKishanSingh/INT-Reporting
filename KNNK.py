@@ -392,9 +392,19 @@ def build_report(file_bytes, currency_choice="1", log=print):
         log("No user '% Delivered' style column found - Delivery will be blank")
         df_raw["_User_Delivery_Pct"] = np.nan
 
+    # CTR: keep user-uploaded values only (no calculation)
+    ctr_candidates = ["CTR", "Click Through Rate", "Click-Through Rate", "CTR %", "CTR%"]
+    source_ctr_col = first_existing_column(df_raw, ctr_candidates)
+    if source_ctr_col:
+        log(f"Found user CTR column: '{source_ctr_col}'")
+        df_raw["_User_CTR"] = clean_percentage_series(df_raw[source_ctr_col])
+    else:
+        log("No user CTR column found - CTR will be blank")
+        df_raw["_User_CTR"] = np.nan
+
     optional_performance_columns = [
         "Delivery Impressions", "Clicks", "Third Party Impressions", "Third Party Clicks",
-        "CTR Benchmark", "Video Starts", "Video Start Rate", "Video 25", "Video 50",
+        "CTR", "CTR Benchmark", "Video Starts", "Video Start Rate", "Video 25", "Video 50",
         "Video 75", "Video Completions", "Video Completion Rate", "Campaign Type",
         "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
         "Contracted Rate", "Total Active View Viewable Impressions",
@@ -464,7 +474,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 "Total Active View % Viewable Impressions",
             ])
         df = convert_numeric_columns(df, other_numeric)
-        df["CTR"] = safe_ratio(df["Clicks"], df["Delivery Impressions"])
+        df["CTR"] = df["_User_CTR"] if "_User_CTR" in df.columns else np.nan
         df["Delivery"] = df["_User_Delivery_Pct"] if "_User_Delivery_Pct" in df.columns else np.nan
         df["Video Start Rate"] = safe_ratio(df["Video Starts"], df["Delivery Impressions"])
         df["Video Completion Rate"] = safe_ratio(df["Video Completions"], df["Video Starts"])
@@ -500,7 +510,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             "Billable Impressions", "Contracted Rate", "Net Cost",
             "Campaign Budget Delivered", "Campaign Budget Remaining",
         ])
-        df["CTR"] = safe_ratio(df["Clicks"], df["Delivery Impressions"])
+        df["CTR"] = df["_User_CTR"] if "_User_CTR" in df.columns else np.nan
         df["Delivery"] = df["_User_Delivery_Pct"] if "_User_Delivery_Pct" in df.columns else np.nan
         start = pd.to_datetime(df["Campaign Start"], errors="coerce")
         end = pd.to_datetime(df["Campaign End"], errors="coerce")
@@ -530,7 +540,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             "Video Completions", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
         ]:
             total[col] = pd.to_numeric(df[col], errors="coerce").sum()
-        total["CTR"] = safe_ratio(total["Clicks"], total["Delivery Impressions"])
+        total["CTR"] = np.nan  # keep user-uploaded only; no total calculation
         total["Delivery"] = np.nan
         total["Video Start Rate"] = safe_ratio(total["Video Starts"], total["Delivery Impressions"])
         total["Video Completion Rate"] = safe_ratio(total["Video Completions"], total["Video Starts"])
@@ -553,7 +563,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
             "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
         ]:
             total[col] = pd.to_numeric(df[col], errors="coerce").sum()
-        total["CTR"] = safe_ratio(total["Clicks"], total["Delivery Impressions"])
+        total["CTR"] = np.nan  # keep user-uploaded only; no total calculation
         total["Delivery"] = np.nan
         total["Campaign Length"] = pd.to_numeric(df["Campaign Length"], errors="coerce").max()
         return pd.DataFrame([total], columns=special_columns)
@@ -781,7 +791,6 @@ def build_report(file_bytes, currency_choice="1", log=print):
             "Video Completions", "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
         ],
         ratio_pairs=[
-            ("CTR", "Clicks", "Delivery Impressions"),
             ("Video Start Rate", "Video Starts", "Delivery Impressions"),
             ("Video Completion Rate", "Video Completions", "Video Starts"),
         ],
@@ -800,9 +809,6 @@ def build_report(file_bytes, currency_choice="1", log=print):
                 "Contracted Impressions", "Delivery Impressions", "Billable Impressions",
                 "Clicks", "Third Party Impressions", "Third Party Clicks",
                 "Net Cost", "Campaign Budget Delivered", "Campaign Budget Remaining",
-            ],
-            ratio_pairs=[
-                ("CTR", "Clicks", "Delivery Impressions"),
             ],
             max_columns=["Campaign Length"],
         )
@@ -1099,6 +1105,7 @@ def build_report(file_bytes, currency_choice="1", log=print):
     log("Header block (rows 1-8 + logo) copied from source file")
     log("Report Proposal Name / ID filled only if source is blank")
     log("Delivery column = user-uploaded values only")
+    log("CTR column = user-uploaded values only (no calculation)")
     log(f"Download name: {download_name}")
     return output_bytes, download_name, df_creative_final
 
